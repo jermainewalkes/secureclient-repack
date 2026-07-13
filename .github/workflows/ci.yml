@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  macos:
+    name: macOS (shellcheck + bats)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tooling
+        run: brew install shellcheck bats-core
+
+      - name: Shellcheck
+        run: shellcheck secureclient-repack.sh
+
+      - name: Syntax check
+        run: bash -n secureclient-repack.sh
+
+      - name: Smoke test
+        run: |
+          ./secureclient-repack.sh --version
+          ./secureclient-repack.sh --help >/dev/null
+
+      - name: Bats tests
+        run: bats tests/macos.bats
+
+  windows:
+    name: Windows (PSScriptAnalyzer + Pester)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tooling
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          Install-Module Pester -Force -Scope CurrentUser -SkipPublisherCheck
+
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          $results = Invoke-ScriptAnalyzer -Path ./secureclient-repack.ps1 -Severity Warning, Error
+          $results | Format-Table -AutoSize
+          if ($results) { throw "PSScriptAnalyzer reported $($results.Count) finding(s)." }
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $out = ./secureclient-repack.ps1 -Version
+          if ($out -ne 'secureclient-repack 1.0.0') { throw "Unexpected version output: $out" }
+
+      - name: Pester tests
+        shell: pwsh
+        run: |
+          $config = New-PesterConfiguration
+          $config.Run.Path = 'tests/windows.Tests.ps1'
+          $config.Run.Exit = $true
+          $config.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $config

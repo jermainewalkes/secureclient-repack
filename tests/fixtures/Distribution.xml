@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Synthetic Distribution used by the test suite. It mirrors the structure
+     pkgutil produces when expanding a multi-module installer pkg: a
+     choices-outline of leaf choices, choice elements holding pkg-ref ids and
+     top-level pkg-ref declarations whose text names the payload folder.
+     module_dart and module_nvm intentionally share a pkg-ref so the tests can
+     prove shared payloads survive a partial drop. -->
+<installer-gui-script minSpecVersion="2">
+    <title>Example Multi-Module Client</title>
+    <options customize="allow" require-scripts="false"/>
+    <choices-outline>
+        <line choice="module_vpn"/>
+        <line choice="module_ui"/>
+        <line choice="module_umbrella"/>
+        <line choice="module_dart"/>
+        <line choice="module_nvm"/>
+    </choices-outline>
+    <choice id="module_vpn" title="Core VPN" enabled="false" selected="true">
+        <pkg-ref id="com.example.vpn"/>
+    </choice>
+    <choice id="module_ui" title="Client UI" enabled="false" selected="true">
+        <pkg-ref id="com.example.ui"/>
+    </choice>
+    <choice id="module_umbrella" title="Umbrella" selected="false">
+        <pkg-ref id="com.example.umbrella"/>
+    </choice>
+    <choice id="module_dart" title="Diagnostics" selected="false">
+        <pkg-ref id="com.example.dart"/>
+        <pkg-ref id="com.example.common"/>
+    </choice>
+    <choice id="module_nvm" title="Visibility" selected="false">
+        <pkg-ref id="com.example.nvm"/>
+        <pkg-ref id="com.example.common"/>
+    </choice>
+    <pkg-ref id="com.example.vpn" version="1.0" onConclusion="none">#vpn_module.pkg</pkg-ref>
+    <pkg-ref id="com.example.ui" version="1.0" onConclusion="none">#ui_module.pkg</pkg-ref>
+    <pkg-ref id="com.example.umbrella" version="1.0" onConclusion="none">#umbrella_module.pkg</pkg-ref>
+    <pkg-ref id="com.example.dart" version="1.0" onConclusion="none">#dart_module.pkg</pkg-ref>
+    <pkg-ref id="com.example.nvm" version="1.0" onConclusion="none">#nvm_module.pkg</pkg-ref>
+    <pkg-ref id="com.example.common" version="1.0" onConclusion="none">#common_module.pkg</pkg-ref>
+</installer-gui-script>
