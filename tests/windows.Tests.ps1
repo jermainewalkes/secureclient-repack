@@ -1,4 +1,4 @@
-# Pester tests for secureclient-repack.ps1. The script is dot-sourced with
+﻿# Pester tests for secureclient-repack.ps1. The script is dot-sourced with
 # SECURECLIENT_REPACK_TEST set, which exposes its functions without running
 # the pipeline. No Cisco content is required — module lists are synthetic.
 
