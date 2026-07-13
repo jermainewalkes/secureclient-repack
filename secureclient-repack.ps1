@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
 Repackage the Cisco Secure Client Windows predeploy bundle for MDM deployment.
 
