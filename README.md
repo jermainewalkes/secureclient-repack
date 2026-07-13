@@ -197,12 +197,6 @@ Both tools are plain-text command-line programs: prompts are linear and screen-r
 
 secureclient-repack is free software under the [MIT licence](LICENSE). If it saved you an afternoon of installer surgery, you can support development on [Ko-fi](https://ko-fi.com/jwalkes).
 
-## Roadmap
-
-- Choice-preserving mode: keep dropped modules installable but deselected instead of stripping them.
-- Profile bundling: optionally stage the VPN profile XML alongside the client.
-- Homebrew formula for the macOS tool.
-
 ---
 
 This project is not affiliated with, endorsed by or supported by Cisco Systems, Inc. Cisco, Cisco Secure Client, AnyConnect and Umbrella are trademarks of Cisco Systems, Inc. You must obtain Secure Client from your own Cisco account under your own licence.
