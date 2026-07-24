@@ -267,7 +267,7 @@ Describe 'New-DetectScript' {
         $text = New-DetectScript -Kept $kept -BundleVersion '5.1.16.194'
         # 5.1.10.233-k9 must not defeat the comparison
         $text | Should -Match 'ConvertTo-ClientVersion'
-        $text | Should -Match [regex]::Escape('^\d+(\.\d+){0,3}')
+        $text | Should -Match ([regex]::Escape('^\d+(\.\d+){0,3}'))
     }
     It 'compares against the highest installed core version, not the first entry' {
         $kept = Select-KeptModule -Modules $script:SampleModules -KeepSpec 'vpn'
