@@ -15,12 +15,16 @@ BeforeAll {
         [pscustomobject]@{ Name = 'cisco-secure-client-win-5.1.16.194-nvm-predeploy-k9.msi';      Code = 'nvm' }
     )
 
-    # Parses generated script text the way PowerShell itself would.
-    function script:Test-GeneratedScript {
+    # Parses generated script text the way PowerShell itself would, and reports
+    # how many syntax errors it found. Returning the count rather than the error
+    # collection avoids PowerShell unrolling an empty array to $null, which
+    # Set-StrictMode then rejects when .Count is read.
+    function script:Get-ScriptParseErrorCount {
         param([Parameter(Mandatory)][string]$Text)
         $errors = $null
         [void][System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$null, [ref]$errors)
-        return @($errors)
+        if ($null -eq $errors) { return 0 }
+        return @($errors).Count
     }
 }
 
@@ -163,7 +167,7 @@ Describe 'New-InstallScript' {
     It 'emits a script that parses' {
         $kept = Select-KeptModule -Modules $script:SampleModules -KeepSpec 'all'
         $text = New-InstallScript -Kept $kept -HasOrgInfo $true
-        (Test-GeneratedScript -Text $text).Count | Should -Be 0
+        Get-ScriptParseErrorCount -Text $text | Should -Be 0
     }
     It 'cannot be broken out of by a hostile MSI filename' {
         # the repack refuses such names outright, but the generator must not be
@@ -173,7 +177,7 @@ Describe 'New-InstallScript' {
             [pscustomobject]@{ Name = "umbrella'; Write-Output PWNED; '.msi"; Code = 'umbrella' }
         )
         $text = New-InstallScript -Kept $hostile -HasOrgInfo $false
-        (Test-GeneratedScript -Text $text).Count | Should -Be 0
+        Get-ScriptParseErrorCount -Text $text | Should -Be 0
         # the payload survives only as inert literal text, never as a command
         $text | Should -Not -Match '(?m)^\s*Write-Output PWNED'
         $text | Should -Match ([regex]::Escape('$(Write-Output PWNED)'))
@@ -201,7 +205,7 @@ Describe 'New-UninstallScript' {
         $text | Should -Match 'exit 3010'
     }
     It 'emits a script that parses' {
-        (Test-GeneratedScript -Text (New-UninstallScript)).Count | Should -Be 0
+        Get-ScriptParseErrorCount -Text (New-UninstallScript) | Should -Be 0
     }
 }
 
@@ -227,7 +231,7 @@ Describe 'New-DetectScript' {
     }
     It 'emits a script that parses' {
         $kept = Select-KeptModule -Modules $script:SampleModules -KeepSpec 'all'
-        (Test-GeneratedScript -Text (New-DetectScript -Kept $kept -BundleVersion '5.1.16.194')).Count | Should -Be 0
+        Get-ScriptParseErrorCount -Text (New-DetectScript -Kept $kept -BundleVersion '5.1.16.194') | Should -Be 0
     }
 }
 
