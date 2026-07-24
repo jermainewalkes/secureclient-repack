@@ -33,17 +33,41 @@ if [[ -z "${SECURECLIENT_REPACK_TEST:-}" ]]; then
   set -euo pipefail
 fi
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 # ---------- helpers -----------------------------------------------------------
 lower(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 die(){ echo "ERROR: $*" >&2; exit 1; }
-is_pinned(){ local lc; lc="$(lower "$1")"; [[ "$lc" == *vpn* || "$lc" == *gui* || "$lc" == *ui* ]]; }
+
+# "gui" and "ui" are matched as whole words only: as bare substrings they also
+# match anything merely containing them — build, suite, requirements, guided —
+# which would then be labelled as the UI shell and impossible to drop.
+is_ui_module(){ [[ "$(lower "$1")" =~ (^|[^a-z0-9])(gui|ui)([^a-z0-9]|$) ]]; }
+
+# The base client cannot run without the VPN core or the GUI shell.
+is_pinned(){
+  local lc; lc="$(lower "$1")"
+  if [[ "$lc" == *vpn* ]]; then return 0; fi
+  is_ui_module "$lc"
+}
+
+# Payload folder names come from the package's own Distribution. Anything other
+# than a plain folder name (traversal, absolute path, leading dash) must never
+# reach the rm -rf that deletes orphaned payloads.
+validate_payload_name(){
+  case "$1" in
+    ''|.|..)     die "Refusing an empty or relative payload path from the package: '$1'";;
+    */*|*..*|-*) die "Refusing an unsafe payload path from the package: '$1'";;
+  esac
+}
 
 friendly(){
-  case "$(lower "$1")" in
+  local lc; lc="$(lower "$1")"
+  if [[ "$lc" != *vpn* ]] && is_ui_module "$lc"; then
+    echo "GUI / UI shell (pinned)"; return 0
+  fi
+  case "$lc" in
     *vpn*)                          echo "VPN — Core & AnyConnect (base client, pinned)";;
-    *gui*|*ui*)                     echo "GUI / UI shell (pinned)";;
     *umbrella*)                     echo "Umbrella Roaming Security";;
     *dart*)                         echo "DART — Diagnostics & Reporting";;
     *iseposture*|*ise_posture*)     echo "ISE Posture";;
@@ -61,8 +85,10 @@ friendly(){
 }
 
 shortcode(){
-  case "$(lower "$1")" in
-    *vpn*) echo vpn;; *gui*|*ui*) echo ui;; *umbrella*) echo umbrella;;
+  local lc; lc="$(lower "$1")"
+  if [[ "$lc" != *vpn* ]] && is_ui_module "$lc"; then echo ui; return 0; fi
+  case "$lc" in
+    *vpn*) echo vpn;; *umbrella*) echo umbrella;;
     *dart*) echo dart;; *iseposture*) echo ise;; *nvm*) echo nvm;;
     *thousandeyes*) echo te;; *zta*) echo zta;;
     *firewallposture*|*hostscan*) echo sfp;; *posture*) echo posture;;
@@ -258,25 +284,52 @@ compute_ref_sets(){
     fi
   done < "$map"
 
-  DROP_REF=" "; DROP_FOLDER=" "
+  # DROP_FOLDER is newline-delimited: payload names may contain spaces, and a
+  # space-separated set would split them into tokens that silently match nothing.
+  DROP_REF=" "; DROP_FOLDER=$'\n'
   while IFS=$'\t' read -r cid rid folder; do
     [[ -z "$rid" ]] && continue
     if [[ "$DROP_CH" == *" $cid "* && "$KEEP_REF" != *" $rid "* ]]; then
       [[ "$DROP_REF" == *" $rid "* ]] || DROP_REF+="$rid "
       f="${folder#\#}"
-      [[ -n "$f" && "$DROP_FOLDER" != *" $f "* ]] && DROP_FOLDER+="$f "
+      if [[ -n "$f" ]]; then
+        validate_payload_name "$f"
+        [[ "$DROP_FOLDER" == *$'\n'"$f"$'\n'* ]] || DROP_FOLDER+="$f"$'\n'
+      fi
     fi
   done < "$map"
   return 0
 }
 
-# validate an OrgInfo.json candidate (valid JSON + expected keys).
-# plutil -convert is used because plutil -lint does not accept JSON input.
+# verify the transform against IDS/KEEP: every kept choice must have survived
+# and every dropped choice must be gone.
+# -F throughout: a choice id is a literal, and a regex metacharacter in one
+# (a dot, say) would otherwise match a different choice and mis-fire the guard.
+verify_choices(){
+  local dist="$1" i cid
+  for i in "${!IDS[@]}"; do
+    cid="${IDS[$i]}"
+    if [[ ${KEEP[$i]} -eq 1 ]]; then
+      grep -qF "choice=\"$cid\"" "$dist" || die "Kept choice $cid vanished after transform — original saved at ${WORK:-the work directory}/Distribution.orig"
+    else
+      grep -qF "choice=\"$cid\"" "$dist" && die "Dropped choice $cid still present after transform — aborting."
+    fi
+  done
+  return 0
+}
+
+# validate an OrgInfo.json candidate (really JSON + expected keys).
+# plutil -convert is used because plutil -lint does not accept JSON input, but
+# it accepts *any* property-list format — an XML plist named OrgInfo.json would
+# pass — so the object check below is what pins it to JSON.
 check_orginfo(){
+  local first k
+  first="$(tr -d '[:space:]' < "$1" | dd bs=1 count=1 2>/dev/null || true)"
+  [[ "$first" == "{" ]] || die "OrgInfo.json is not a JSON object: $1"
   plutil -convert xml1 "$1" -o /dev/null >/dev/null 2>&1 || die "OrgInfo.json is not valid JSON: $1"
-  local k
   for k in organizationId fingerprint userId; do
-    grep -q "$k" "$1" || echo "  warning: '$k' not found in OrgInfo.json — double-check it is the dashboard file."
+    # match the key, not the same text appearing in some value
+    grep -q "\"$k\"[[:space:]]*:" "$1" || echo "  warning: '$k' not found in OrgInfo.json — double-check it is the dashboard file."
   done
 }
 
@@ -285,8 +338,14 @@ check_orginfo(){
 # bundle, so bundle-ID based MDM detection (e.g. Intune's PKG app type) would
 # never report it installed. A root script needs no detection and matches
 # Cisco's own deployment guidance.
+#
+# The profile is embedded base64-encoded rather than inside a heredoc. A heredoc
+# ends at any line equal to its delimiter, so a profile containing that line
+# would close it early and turn the remainder into commands run as root on every
+# endpoint. Base64 has no delimiter to break out of.
 write_orginfo_script(){
-  local org="$1" out="$2"
+  local org="$1" out="$2" b64
+  b64="$(base64 < "$org" | tr -d '\n')"
   # shellcheck disable=SC2016  # the single-quoted lines are the generated script's own text
   printf '%s\n' \
     '#!/bin/bash' \
@@ -295,19 +354,20 @@ write_orginfo_script(){
     'set -e' \
     'DIR="/opt/cisco/secureclient/umbrella"' \
     'mkdir -p "$DIR"' \
-    "cat > \"\$DIR/OrgInfo.json\" <<'ORGINFO_EOF'" > "$out"
-  {
-    cat "$org"
-    printf '\n'
-  } >> "$out"
-  # shellcheck disable=SC2016  # the single-quoted lines are the generated script's own text
-  printf '%s\n' \
-    'ORGINFO_EOF' \
+    '# The profile is embedded base64-encoded so that no part of its content can' \
+    '# be interpreted as shell.' \
+    "ORGINFO_B64='$b64'" \
+    '# -D decodes on macOS (BSD base64); -d is the GNU spelling.' \
+    'if printf %s "$ORGINFO_B64" | base64 -D > "$DIR/OrgInfo.json" 2>/dev/null; then' \
+    '  :' \
+    'else' \
+    '  printf %s "$ORGINFO_B64" | base64 -d > "$DIR/OrgInfo.json"' \
+    'fi' \
     'chmod 644 "$DIR/OrgInfo.json"' \
     'chown root:wheel "$DIR/OrgInfo.json" 2>/dev/null || true' \
     '# Note: on a client already registered, the drop file is ignored until' \
     '# "$DIR/data" is cleared (or the Umbrella module is reinstalled).' \
-    'echo "OrgInfo.json deployed to $DIR"' >> "$out"
+    'echo "OrgInfo.json deployed to $DIR"' > "$out"
   chmod +x "$out"
 }
 
@@ -484,21 +544,18 @@ compute_ref_sets "$WORK/map.txt"
 xsltproc --stringparam dropChoices "$DROP_CH" --stringparam dropRefs "$DROP_REF" \
   "$WORK/strip.xsl" "$WORK/Distribution.orig" > "$DIST"
 
-# delete orphaned payload folders
-# shellcheck disable=SC2086  # DROP_FOLDER is a space-separated set by design
-for f in $DROP_FOLDER; do
-  [[ -d "$WORK/expanded/$f" ]] && rm -rf "$WORK/expanded/$f" && echo "  removed payload: $f"
-done
+# delete orphaned payload folders. Names were validated when the drop set was
+# built, and the list is newline-delimited so names containing spaces survive.
+while IFS= read -r f; do
+  [[ -n "$f" ]] || continue
+  if [[ -d "$WORK/expanded/$f" ]]; then
+    rm -rf "$WORK/expanded/$f"
+    echo "  removed payload: $f"
+  fi
+done <<< "$DROP_FOLDER"
 
 # ---------- guards ------------------------------------------------------------
-for i in "${!IDS[@]}"; do
-  cid="${IDS[$i]}"
-  if [[ ${KEEP[$i]} -eq 1 ]]; then
-    grep -q "choice=\"$cid\"" "$DIST" || die "Kept choice $cid vanished after transform — original saved at $WORK/Distribution.orig"
-  else
-    grep -q "choice=\"$cid\"" "$DIST" && die "Dropped choice $cid still present after transform — aborting."
-  fi
-done
+verify_choices "$DIST"
 # every payload still referenced must still exist on disk
 while IFS= read -r ref; do
   f="${ref#\#}"; [[ -n "$f" ]] || continue
@@ -518,79 +575,80 @@ UNSIGNED="$WORK/Cisco Secure Client-${VER}${TAG}.pkg"
 pkgutil --flatten "$WORK/expanded" "$UNSIGNED"
 echo "Built unsigned: $(basename "$UNSIGNED")"
 
-if [[ $NO_SIGN -eq 1 ]]; then
-  FINAL="$OUT_DIR/$(basename "$UNSIGNED")"
-  cp "$UNSIGNED" "$FINAL"
-  echo; echo "Skipping signing (--no-sign). Unsigned pkg:"
-  echo "  $FINAL"
-  SIGNED=""
-else
-  # ---------- 6. pick a Developer ID Installer identity ------------------------
-  echo; echo "== Developer ID Installer identities =="
-  ILINES=()
-  while IFS= read -r line; do ILINES+=("$line"); done \
-    < <(security find-identity -v -p basic 2>/dev/null | grep "Developer ID Installer" || true)
-
-  if (( ${#ILINES[@]} == 0 )); then
-    FINAL="$OUT_DIR/$(basename "$UNSIGNED")"
-    cp "$UNSIGNED" "$FINAL"
-    echo "No 'Developer ID Installer' identity found. Unsigned pkg is here:"
-    echo "  $FINAL"
-    echo "Sign it on a machine that holds the cert, then upload."
-    exit 0
-  fi
-
-  IHASH=(); INAME=()
-  for l in "${ILINES[@]}"; do
-    IHASH+=("$(awk '{print $2}' <<<"$l")")
-    INAME+=("$(sed -E 's/^[^"]*"([^"]*)".*/\1/' <<<"$l")")
-  done
-
-  SEL=-1
-  if [[ -n "$IDENTITY_ARG" ]]; then
-    for i in "${!IHASH[@]}"; do
-      if [[ "${IHASH[$i]}" == "$IDENTITY_ARG" || "${INAME[$i]}" == *"$IDENTITY_ARG"* ]]; then
-        SEL=$i; break
-      fi
-    done
-    (( SEL >= 0 )) || die "No 'Developer ID Installer' identity matches '$IDENTITY_ARG'."
-  elif (( ${#IHASH[@]} == 1 )); then
-    SEL=0
-  elif [[ -n "$KEEP_ARG" || $ASSUME_YES -eq 1 ]]; then
-    die "Multiple signing identities found — pass --identity <name-or-hash> when running non-interactively."
-  else
-    echo "Multiple signing identities:"
-    for i in "${!INAME[@]}"; do printf "  %d) %s\n" "$((i+1))" "${INAME[$i]}"; done
-    while :; do
-      read -r -p "Choose identity number: " pick || pick=""
-      if [[ "$pick" =~ ^[0-9]+$ ]] && (( pick>=1 && pick<=${#IHASH[@]} )); then SEL=$((pick-1)); break; fi
-      echo "Pick a valid number."
-    done
-  fi
-  echo "Signing with: ${INAME[$SEL]}"
-
-  # ---------- 7. sign + verify --------------------------------------------------
-  SIGNED="$OUT_DIR/Cisco Secure Client-${VER}${TAG}-signed.pkg"
-  rm -f "$SIGNED"
-  productsign --sign "${IHASH[$SEL]}" "$UNSIGNED" "$SIGNED"
-  echo; echo "== Signature =="
-  pkgutil --check-signature "$SIGNED"
-fi
-
-# ---------- 8. OrgInfo deploy script ------------------------------------------
+# ---------- 6. OrgInfo deploy script ------------------------------------------
+# Written before signing so it is still produced when no signing identity is
+# present — that is the "sign it on a machine that holds the cert" workflow,
+# and the OrgInfo script is needed either way.
 ORG_SCRIPT=""
 if [[ $UMB -eq 1 && -n "$ORG" ]]; then
   ORG_SCRIPT="$OUT_DIR/deploy-orginfo.sh"
   write_orginfo_script "$ORG" "$ORG_SCRIPT"
 fi
 
+# ---------- 7. sign, or keep the unsigned pkg --------------------------------
+SIGNED=""; UNSIGNED_OUT=""
+if [[ $NO_SIGN -eq 1 ]]; then
+  UNSIGNED_OUT="$OUT_DIR/$(basename "$UNSIGNED")"
+  cp "$UNSIGNED" "$UNSIGNED_OUT"
+  echo; echo "Skipping signing (--no-sign)."
+else
+  echo; echo "== Developer ID Installer identities =="
+  ILINES=()
+  while IFS= read -r line; do ILINES+=("$line"); done \
+    < <(security find-identity -v -p basic 2>/dev/null | grep "Developer ID Installer" || true)
+
+  if (( ${#ILINES[@]} == 0 )); then
+    UNSIGNED_OUT="$OUT_DIR/$(basename "$UNSIGNED")"
+    cp "$UNSIGNED" "$UNSIGNED_OUT"
+    echo "No 'Developer ID Installer' identity found."
+    echo "Sign the unsigned pkg on a machine that holds the cert, then upload."
+  else
+    IHASH=(); INAME=()
+    for l in "${ILINES[@]}"; do
+      IHASH+=("$(awk '{print $2}' <<<"$l")")
+      INAME+=("$(sed -E 's/^[^"]*"([^"]*)".*/\1/' <<<"$l")")
+    done
+
+    SEL=-1
+    if [[ -n "$IDENTITY_ARG" ]]; then
+      for i in "${!IHASH[@]}"; do
+        if [[ "${IHASH[$i]}" == "$IDENTITY_ARG" || "${INAME[$i]}" == *"$IDENTITY_ARG"* ]]; then
+          SEL=$i; break
+        fi
+      done
+      (( SEL >= 0 )) || die "No 'Developer ID Installer' identity matches '$IDENTITY_ARG'."
+    elif (( ${#IHASH[@]} == 1 )); then
+      SEL=0
+    elif [[ -n "$KEEP_ARG" || $ASSUME_YES -eq 1 ]]; then
+      die "Multiple signing identities found — pass --identity <name-or-hash> when running non-interactively."
+    else
+      echo "Multiple signing identities:"
+      for i in "${!INAME[@]}"; do printf "  %d) %s\n" "$((i+1))" "${INAME[$i]}"; done
+      while :; do
+        read -r -p "Choose identity number: " pick || pick=""
+        if [[ "$pick" =~ ^[0-9]+$ ]] && (( pick>=1 && pick<=${#IHASH[@]} )); then SEL=$((pick-1)); break; fi
+        echo "Pick a valid number."
+      done
+    fi
+    echo "Signing with: ${INAME[$SEL]}"
+
+    SIGNED="$OUT_DIR/Cisco Secure Client-${VER}${TAG}-signed.pkg"
+    rm -f "$SIGNED"
+    productsign --sign "${IHASH[$SEL]}" "$UNSIGNED" "$SIGNED"
+    echo; echo "== Signature =="
+    pkgutil --check-signature "$SIGNED"
+  fi
+fi
+
 # ---------- done --------------------------------------------------------------
 echo
 echo "DONE."
-if [[ -n "${SIGNED:-}" ]]; then
-  echo "Signed client pkg : $SIGNED"
+if [[ -n "$SIGNED" ]]; then
+  echo "Signed client pkg   : $SIGNED"
+else
+  echo "Unsigned client pkg : $UNSIGNED_OUT"
 fi
-[[ -n "$ORG_SCRIPT" ]] && echo "OrgInfo script    : $ORG_SCRIPT"
+[[ -n "$ORG_SCRIPT" ]] && echo "OrgInfo script      : $ORG_SCRIPT"
 echo
 echo "Next steps:"
 echo "  - Upload the pkg to your MDM as a macOS installer package. It now"
