@@ -90,7 +90,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:ToolVersion = '1.1.1'
+$script:ToolVersion = '1.1.2'
 
 if ($Version) {
     Write-Output "secureclient-repack $script:ToolVersion"

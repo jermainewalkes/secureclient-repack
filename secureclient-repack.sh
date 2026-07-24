@@ -33,7 +33,7 @@ if [[ -z "${SECURECLIENT_REPACK_TEST:-}" ]]; then
   set -euo pipefail
 fi
 
-VERSION="1.1.1"
+VERSION="1.1.2"
 
 # ---------- helpers -----------------------------------------------------------
 lower(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
