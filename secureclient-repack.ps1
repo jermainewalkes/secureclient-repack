@@ -612,8 +612,10 @@ try {
             $subject = [string]$sig.SignerCertificate.Subject
             Write-Host ("  ok      {0} — {1}" -f $m.Name, $subject)
             # a valid signature only proves *someone* trusted signed it, which is
-            # not the same as it having come from Cisco
-            if ($subject -notmatch 'O=Cisco Systems') {
+            # not the same as it having come from Cisco. Match the whole O
+            # component: a bare substring would also accept an organisation such
+            # as "Cisco Systems Consulting".
+            if ($subject -notmatch 'O=Cisco Systems, Inc\.($|,)') {
                 $foreignSigner += [pscustomobject]@{ Name = $m.Name; Subject = $subject }
             }
         } else {

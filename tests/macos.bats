@@ -344,6 +344,22 @@ PLIST
   [[ "$output" == *"not a JSON object"* ]]
 }
 
+@test "check_orginfo survives a profile larger than the pipe buffer under pipefail" {
+  # the suite sources the script with strict mode off, so strict mode is
+  # re-enabled here: a first-character read that used a pipeline died with 141
+  # on any file bigger than the pipe buffer, before the file was ever validated
+  BIG="$BATS_TEST_TMPDIR/OrgInfo.json"
+  {
+    printf '{"organizationId":"1234567","fingerprint":"abc","userId":"7654321","pad":"'
+    for _ in $(seq 1 2000); do printf '%0.sxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' 1; done
+    printf '"}\n'
+  } > "$BIG"
+  [ "$(wc -c < "$BIG")" -gt 65536 ]
+  run bash -c 'SECURECLIENT_REPACK_TEST=1; . "$1"; set -euo pipefail; check_orginfo "$2"' _ "$SCRIPT" "$BIG"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"warning"* ]]
+}
+
 @test "check_orginfo does not count a key name appearing inside a value" {
   printf '{"organizationId":"1234567","note":"userId and fingerprint go here"}\n' \
     > "$BATS_TEST_TMPDIR/OrgInfo.json"

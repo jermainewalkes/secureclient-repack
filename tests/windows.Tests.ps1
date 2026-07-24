@@ -334,3 +334,143 @@ Describe 'Test-OrgInfoFile' {
             Should -Throw '*not found*'
     }
 }
+
+Describe 'generated detect.ps1, executed' {
+    BeforeAll {
+        # Text assertions cannot show that detection reaches the right verdict.
+        # These run the generated script in a child PowerShell with the registry
+        # lookup stubbed, and check the exit code the MDM would actually see.
+        function script:Invoke-GeneratedDetect {
+            param([Parameter(Mandatory)][string]$Text, [Parameter(Mandatory)][object[]]$Entries)
+            $json = ($Entries | ConvertTo-Json -Depth 4 -Compress)
+            if ($Entries.Count -eq 1) { $json = "[$json]" }
+            $stub = @"
+function Get-ItemProperty {
+    param([object]`$Path, [object]`$ErrorAction)
+    return (@'
+$json
+'@ | ConvertFrom-Json)
+}
+"@
+            $file = Join-Path $TestDrive ('detect-' + [IO.Path]::GetRandomFileName() + '.ps1')
+            Set-Content -LiteralPath $file -Value ($stub + "`r`n" + $Text) -Encoding UTF8
+            $exe = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
+            if (-not $exe) { $exe = (Get-Command powershell).Source }
+            & $exe -NoProfile -File $file | Out-Null
+            return $LASTEXITCODE
+        }
+
+        function script:New-Entry {
+            param([string]$DisplayName, [string]$DisplayVersion)
+            [pscustomobject]@{ DisplayName = $DisplayName; DisplayVersion = $DisplayVersion }
+        }
+
+        $script:DetectUmbrella = New-DetectScript `
+            -Kept (Select-KeptModule -Modules $script:SampleModules -KeepSpec 'umbrella') `
+            -BundleVersion '5.1.16.194'
+        $script:DetectCoreOnly = New-DetectScript `
+            -Kept (Select-KeptModule -Modules $script:SampleModules -KeepSpec 'vpn') `
+            -BundleVersion '5.1.16.194'
+    }
+
+    It 'reports installed when the version matches and the kept module is present' {
+        $entries = @(
+            (New-Entry 'Cisco Secure Client - AnyConnect VPN' '5.1.16.194'),
+            (New-Entry 'Cisco Secure Client - Umbrella Roaming Security' '5.1.16.194')
+        )
+        Invoke-GeneratedDetect -Text $script:DetectUmbrella -Entries $entries | Should -Be 0
+    }
+    It 'reports not-installed for an older client, so the upgrade is delivered' {
+        $entries = @(
+            (New-Entry 'Cisco Secure Client - AnyConnect VPN' '5.1.3.62'),
+            (New-Entry 'Cisco Secure Client - Umbrella Roaming Security' '5.1.3.62')
+        )
+        Invoke-GeneratedDetect -Text $script:DetectUmbrella -Entries $entries | Should -Be 1
+    }
+    It 'tolerates a DisplayVersion with a suffix' {
+        $entries = @(
+            (New-Entry 'Cisco Secure Client - AnyConnect VPN' '5.1.16.194-k9'),
+            (New-Entry 'Cisco Secure Client - Umbrella Roaming Security' '5.1.16.194')
+        )
+        Invoke-GeneratedDetect -Text $script:DetectUmbrella -Entries $entries | Should -Be 0
+    }
+    It 'is not fooled by a stale entry listed before the current one' {
+        $entries = @(
+            (New-Entry 'Cisco Secure Client - AnyConnect VPN' '4.10.0'),
+            (New-Entry 'Cisco Secure Client - AnyConnect VPN' '5.1.16.194'),
+            (New-Entry 'Cisco Secure Client - Umbrella Roaming Security' '5.1.16.194')
+        )
+        Invoke-GeneratedDetect -Text $script:DetectUmbrella -Entries $entries | Should -Be 0
+    }
+    It 'reports not-installed when a kept module is missing' {
+        $entries = @( (New-Entry 'Cisco Secure Client - AnyConnect VPN' '5.1.16.194') )
+        Invoke-GeneratedDetect -Text $script:DetectUmbrella -Entries $entries | Should -Be 1
+    }
+    It 'recognises a core client named Core VPN rather than AnyConnect VPN' {
+        $entries = @( (New-Entry 'Cisco Secure Client - Core VPN' '5.1.16.194') )
+        Invoke-GeneratedDetect -Text $script:DetectCoreOnly -Entries $entries | Should -Be 0
+    }
+    It 'reports not-installed when no Cisco client is present at all' {
+        $entries = @( (New-Entry 'Some Other Product' '1.0') )
+        Invoke-GeneratedDetect -Text $script:DetectCoreOnly -Entries $entries | Should -Be 1
+    }
+}
+
+Describe 'generated install.ps1, executed' {
+    BeforeAll {
+        # Stubs Start-Process so the exit-code handling can be exercised without
+        # touching msiexec.
+        function script:Invoke-GeneratedInstall {
+            param([Parameter(Mandatory)][string]$Text, [Parameter(Mandatory)][hashtable]$ExitCodes)
+            $dir = Join-Path $TestDrive ([IO.Path]::GetRandomFileName())
+            New-Item -ItemType Directory -Path $dir | Out-Null
+            $map = @()
+            foreach ($k in $ExitCodes.Keys) {
+                Set-Content -LiteralPath (Join-Path $dir $k) -Value 'placeholder'
+                $map += "    '$k' = $($ExitCodes[$k])"
+            }
+            $stub = @"
+`$script:CodeMap = @{
+$($map -join "`r`n")
+}
+function Start-Process {
+    param([string]`$FilePath, [switch]`$Wait, [switch]`$PassThru, [object]`$ArgumentList)
+    `$code = 0
+    foreach (`$name in `$script:CodeMap.Keys) {
+        if (([string]`$ArgumentList) -like "*`$name*") { `$code = `$script:CodeMap[`$name] }
+    }
+    return [pscustomobject]@{ ExitCode = `$code }
+}
+"@
+            $file = Join-Path $dir 'install.ps1'
+            Set-Content -LiteralPath $file -Value ($stub + "`r`n" + $Text) -Encoding UTF8
+            $exe = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
+            if (-not $exe) { $exe = (Get-Command powershell).Source }
+            & $exe -NoProfile -File $file | Out-Null
+            return $LASTEXITCODE
+        }
+
+        $script:InstallText = New-InstallScript `
+            -Kept (Select-KeptModule -Modules $script:SampleModules -KeepSpec 'umbrella') `
+            -HasOrgInfo $false
+        $script:CoreName = 'cisco-secure-client-win-5.1.16.194-core-vpn-predeploy-k9.msi'
+        $script:UmbName  = 'cisco-secure-client-win-5.1.16.194-umbrella-predeploy-k9.msi'
+    }
+
+    It 'exits 0 when every module installs' {
+        Invoke-GeneratedInstall -Text $script:InstallText `
+            -ExitCodes @{ $script:CoreName = 0; $script:UmbName = 0 } | Should -Be 0
+    }
+    It 'exits 3010 when a module asks for a reboot' {
+        Invoke-GeneratedInstall -Text $script:InstallText `
+            -ExitCodes @{ $script:CoreName = 0; $script:UmbName = 3010 } | Should -Be 3010
+    }
+    It 'returns the real code when an optional module fails, not a generic 1' {
+        Invoke-GeneratedInstall -Text $script:InstallText `
+            -ExitCodes @{ $script:CoreName = 0; $script:UmbName = 1603 } | Should -Be 1603
+    }
+    It 'fails fast with the real code when the core module fails' {
+        Invoke-GeneratedInstall -Text $script:InstallText `
+            -ExitCodes @{ $script:CoreName = 1618; $script:UmbName = 0 } | Should -Be 1618
+    }
+}

@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/badge/licence-MIT-green" alt="MIT licence">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Windows-blue" alt="macOS and Windows">
   <img src="https://img.shields.io/badge/runtime-bash%203.2%2B%20%7C%20PowerShell%205.1%2B-lightgrey" alt="bash 3.2+ and PowerShell 5.1+">
-  <img src="https://img.shields.io/badge/tests-81%20passing-brightgreen" alt="81 tests passing">
+  <img src="https://img.shields.io/badge/tests-93%20passing-brightgreen" alt="93 tests passing">
   <a href="https://ko-fi.com/jwalkes"><img src="https://img.shields.io/badge/Ko--fi-support-ff5e5b?logo=ko-fi&logoColor=white" alt="Support on Ko-fi"></a>
 </p>
 
@@ -187,8 +187,8 @@ secureclient-repack/
 ├── tests/
 │   ├── fixtures/Distribution.xml # synthetic multi-module Distribution
 │   ├── e2e/                      # synthetic DMG and zip builders + assertions
-│   ├── macos.bats                # bats-core suite (37 tests)
-│   └── windows.Tests.ps1         # Pester suite (44 tests)
+│   ├── macos.bats                # bats-core suite (38 tests)
+│   └── windows.Tests.ps1         # Pester suite (55 tests)
 └── .github/workflows/ci.yml      # shellcheck + bats, PSScriptAnalyzer + Pester
 ```
 

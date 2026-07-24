@@ -323,8 +323,15 @@ verify_choices(){
 # it accepts *any* property-list format — an XML plist named OrgInfo.json would
 # pass — so the object check below is what pins it to JSON.
 check_orginfo(){
-  local first k
-  first="$(tr -d '[:space:]' < "$1" | head -c 1)"
+  local content leading first k
+  # No pipeline here: a reader that stops after one byte makes the writer take
+  # SIGPIPE, and under `set -o pipefail` that failure propagates and kills the
+  # run before the file is ever validated. It only shows up once the file is
+  # larger than the pipe buffer, which makes it worse, not better.
+  content="$(cat "$1")"
+  leading="${content%%[![:space:]]*}"
+  first="${content#"$leading"}"
+  first="${first:0:1}"
   [[ "$first" == "{" ]] || die "OrgInfo.json is not a JSON object: $1"
   plutil -convert xml1 "$1" -o /dev/null >/dev/null 2>&1 || die "OrgInfo.json is not valid JSON: $1"
   for k in organizationId fingerprint userId; do
