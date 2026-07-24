@@ -90,7 +90,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:ToolVersion = '1.1.0'
+$script:ToolVersion = '1.1.1'
 
 if ($Version) {
     Write-Output "secureclient-repack $script:ToolVersion"
@@ -111,24 +111,29 @@ function Get-ModuleCode {
     param([Parameter(Mandatory)][string]$Name)
     $n = $Name.ToLowerInvariant()
     $m = [regex]::Match($n, '-\d+(\.\d+)+-(?<mod>.+?)-predeploy')
-    $token = if ($m.Success) { $m.Groups['mod'].Value } else { $n }
+    # Without a canonical version-and-predeploy shape, fall back to the whole
+    # name minus its extension: a trailing ".msi" would otherwise defeat the
+    # end-of-token boundary and leave every module unrecognised.
+    $token = if ($m.Success) { $m.Groups['mod'].Value } else { $n -replace '\.msi$', '' }
 
+    # Words within a module name may be separated or run together (nvm and
+    # network-visibility are both seen in the wild), hence the optional -? .
     # ISE Posture must be tested before Secure Firewall Posture: Cisco ships the
     # latter as plain "-posture-", the former as "-iseposture-".
     switch -Regex ($token) {
-        '(^|-)(core-vpn|vpn-core|anyconnect-core)($|-)' { return 'vpn' }
-        '(^|-)umbrella($|-)'                           { return 'umbrella' }
-        '(^|-)dart($|-)'                               { return 'dart' }
-        '(^|-)(iseposture|ise-posture)($|-)'            { return 'ise' }
-        '(^|-)(nvm|networkvisibility)($|-)'             { return 'nvm' }
-        '(^|-)thousandeyes($|-)'                       { return 'te' }
-        '(^|-)(zta|zerotrust)($|-)'                     { return 'zta' }
-        '(^|-)(fireamp|amp)($|-)'                       { return 'amp' }
-        '(^|-)(posture|firewallposture|hostscan)($|-)'  { return 'sfp' }
-        '(^|-)(nam|networkaccess)($|-)'                 { return 'nam' }
-        '(^|-)(sbl|startbeforelogin)($|-)'              { return 'sbl' }
-        '(^|-)websecurity($|-)'                        { return 'websecurity' }
-        default                                        { return 'mod' }
+        '(^|-)(core-vpn|vpn-core|anyconnect-core)($|-)'   { return 'vpn' }
+        '(^|-)umbrella($|-)'                             { return 'umbrella' }
+        '(^|-)dart($|-)'                                 { return 'dart' }
+        '(^|-)(ise-?posture)($|-)'                       { return 'ise' }
+        '(^|-)(nvm|network-?visibility)($|-)'            { return 'nvm' }
+        '(^|-)thousandeyes($|-)'                         { return 'te' }
+        '(^|-)(zta|zero-?trust)($|-)'                    { return 'zta' }
+        '(^|-)(fire-?amp|amp)($|-)'                      { return 'amp' }
+        '(^|-)(posture|firewall-?posture|hostscan)($|-)' { return 'sfp' }
+        '(^|-)(nam|network-?access(-?manager)?)($|-)'    { return 'nam' }
+        '(^|-)(sbl|start-?before(-?login)?)($|-)'         { return 'sbl' }
+        '(^|-)web-?security($|-)'                        { return 'websecurity' }
+        default                                          { return 'mod' }
     }
 }
 
@@ -151,18 +156,24 @@ function Get-ModuleFriendlyName {
     }
 }
 
+# The core client's Add/Remove Programs name is not identical across builds
+# ("AnyConnect VPN" and "Core VPN" are both seen), and both the uninstall order
+# and detection depend on recognising it, so match either spelling.
+$script:CoreVpnCondition = '($_.DisplayName -like ''*AnyConnect VPN*'' -or $_.DisplayName -like ''*Core VPN*'')'
+$script:NotCoreVpnCondition = '(-not ($_.DisplayName -like ''*AnyConnect VPN*'' -or $_.DisplayName -like ''*Core VPN*''))'
+
 function Get-ModuleDisplayNamePattern {
     <#
     .SYNOPSIS
     The Add/Remove Programs DisplayName pattern for a module code.
     .DESCRIPTION
     Used by the generated detect.ps1 to confirm a kept module is actually
-    installed. Returns $null for codes with no dependable pattern, in which case
-    detection falls back to the core client only.
+    installed. Returns $null for the core client (handled separately, since its
+    name varies) and for codes with no dependable pattern.
     #>
     param([Parameter(Mandatory)][string]$Code)
     switch ($Code) {
-        'vpn'      { '*AnyConnect VPN*' }
+        'vpn'      { $null }
         'umbrella' { '*Umbrella*' }
         'dart'     { '*Diagnostic*' }
         'ise'      { '*ISE Posture*' }
@@ -311,7 +322,9 @@ function New-InstallScript {
         '$ErrorActionPreference = ''Stop''',
         '$here = Split-Path -Parent $MyInvocation.MyCommand.Path',
         '$script:rebootRequired = $false',
-        '$script:failed = $false',
+        '# the first failing msiexec code, so the MDM sees the real reason rather',
+        '# than a generic failure',
+        '$script:firstFailure = 0',
         '',
         'function Install-Msi {',
         '    param([string]$FileName, [switch]$Required)',
@@ -319,7 +332,7 @@ function New-InstallScript {
         '    if (-not (Test-Path -LiteralPath $path)) {',
         '        Write-Output "missing installer: $FileName"',
         '        if ($Required) { exit 1 }',
-        '        $script:failed = $true',
+        '        if ($script:firstFailure -eq 0) { $script:firstFailure = 1 }',
         '        return',
         '    }',
         '    $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList "/package `"$path`" /qn /norestart"',
@@ -330,7 +343,7 @@ function New-InstallScript {
         '        default {',
         '            Write-Output "FAILED ($($p.ExitCode)): $FileName"',
         '            if ($Required) { exit $p.ExitCode }',
-        '            $script:failed = $true',
+        '            if ($script:firstFailure -eq 0) { $script:firstFailure = $p.ExitCode }',
         '        }',
         '    }',
         '}',
@@ -355,7 +368,7 @@ function New-InstallScript {
     }
     $lines += @(
         '',
-        'if ($script:failed) { exit 1 }',
+        'if ($script:firstFailure -ne 0) { exit $script:firstFailure }',
         'if ($script:rebootRequired) { exit 3010 }',
         'exit 0'
     )
@@ -383,9 +396,10 @@ function New-UninstallScript {
         '    Sort-Object -Property PSChildName -Unique)',
         'if (-not $entries) { Write-Output ''nothing to uninstall''; exit 0 }',
         '',
-        '# optional modules first, the core client last',
-        '$ordered = @($entries | Where-Object { $_.DisplayName -notlike ''*AnyConnect VPN*'' }) +',
-        '           @($entries | Where-Object { $_.DisplayName -like ''*AnyConnect VPN*'' })',
+        '# optional modules first, the core client last: every module depends on',
+        '# the core VPN, so removing it first would strand the rest',
+        ('$ordered = @($entries | Where-Object { ' + $script:NotCoreVpnCondition + ' }) +'),
+        ('           @($entries | Where-Object { ' + $script:CoreVpnCondition + ' })'),
         '$rebootRequired = $false',
         '$failed = $false',
         'foreach ($e in $ordered) {',
@@ -433,15 +447,26 @@ function New-DetectScript {
         ')',
         '$entries = @(Get-ItemProperty -Path $keys -ErrorAction SilentlyContinue |',
         '    Where-Object { $_.DisplayName -like ''Cisco Secure Client*'' })',
-        '$core = @($entries | Where-Object { $_.DisplayName -like ''*AnyConnect VPN*'' })',
+        ('$core = @($entries | Where-Object { ' + $script:CoreVpnCondition + ' })'),
         'if (-not $core) { exit 1 }',
         '',
-        '# the installed core must be at least the version this package carries',
-        '$installed = $null',
-        '[void][version]::TryParse(([string]$core[0].DisplayVersion), [ref]$installed)',
-        '$wanted = $null',
-        '[void][version]::TryParse($wantedVersion, [ref]$wanted)',
-        'if ($null -eq $installed -or $null -eq $wanted) { exit 1 }',
+        '# DisplayVersion may carry a suffix such as 5.1.10.233-k9, so take the',
+        '# leading numeric part; a stale second entry must not mask a good one, so',
+        '# compare against the highest version present',
+        'function ConvertTo-ClientVersion {',
+        '    param([string]$Text)',
+        '    $m = [regex]::Match(([string]$Text), ''^\d+(\.\d+){0,3}'')',
+        '    if (-not $m.Success) { return $null }',
+        '    $v = $null',
+        '    if ([version]::TryParse($m.Value, [ref]$v)) { return $v }',
+        '    return $null',
+        '}',
+        '$installed = @($core | ForEach-Object { ConvertTo-ClientVersion -Text $_.DisplayVersion } |',
+        '    Where-Object { $_ } | Sort-Object -Descending)',
+        'if (-not $installed) { exit 1 }',
+        '$installed = $installed[0]',
+        '$wanted = ConvertTo-ClientVersion -Text $wantedVersion',
+        'if ($null -eq $wanted) { exit 1 }',
         'if ($installed -lt $wanted) { exit 1 }'
     )
     if ($patterns.Count -gt 0) {
@@ -580,14 +605,24 @@ try {
     Write-Host ''
     Write-Host '== Checking MSI signatures =='
     $badlySigned = @()
+    $foreignSigner = @()
     foreach ($m in $kept) {
         $sig = Get-AuthenticodeSignature -LiteralPath $m.Path
         if ($sig.Status -eq 'Valid') {
-            Write-Host ("  ok      {0} — {1}" -f $m.Name, $sig.SignerCertificate.Subject)
+            $subject = [string]$sig.SignerCertificate.Subject
+            Write-Host ("  ok      {0} — {1}" -f $m.Name, $subject)
+            # a valid signature only proves *someone* trusted signed it, which is
+            # not the same as it having come from Cisco
+            if ($subject -notmatch 'O=Cisco Systems') {
+                $foreignSigner += [pscustomobject]@{ Name = $m.Name; Subject = $subject }
+            }
         } else {
             Write-Host ("  UNSAFE  {0} — signature status: {1}" -f $m.Name, $sig.Status)
             $badlySigned += $m
         }
+    }
+    foreach ($f in $foreignSigner) {
+        Write-Warning ("{0} is validly signed, but not by Cisco Systems: {1}" -f $f.Name, $f.Subject)
     }
     if ($badlySigned) {
         if ($AllowUnsignedMsi) {

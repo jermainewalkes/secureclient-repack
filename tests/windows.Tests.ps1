@@ -62,6 +62,26 @@ Describe 'Get-ModuleCode' {
     It 'distinguishes ISE posture from Secure Firewall Posture' {
         Get-ModuleCode -Name 'cisco-secure-client-win-5.1.16.194-iseposture-predeploy-k9.msi' | Should -Be 'ise'
     }
+    It 'accepts the hyphenated spellings of multi-word modules' {
+        $cases = @{
+            'network-visibility'     = 'nvm'
+            'zero-trust'             = 'zta'
+            'start-before-login'     = 'sbl'
+            'network-access-manager' = 'nam'
+            'ise-posture'            = 'ise'
+            'firewall-posture'       = 'sfp'
+        }
+        foreach ($token in $cases.Keys) {
+            $name = "cisco-secure-client-win-5.1.16.194-$token-predeploy-k9.msi"
+            Get-ModuleCode -Name $name | Should -Be $cases[$token] -Because "$name should map to $($cases[$token])"
+        }
+    }
+    It 'still recognises a module when the name has no version or predeploy marker' {
+        # the fallback token must not keep the .msi extension, or the
+        # end-of-token boundary can never match
+        Get-ModuleCode -Name 'umbrella.msi' | Should -Be 'umbrella'
+        Get-ModuleCode -Name 'core-vpn.msi' | Should -Be 'vpn'
+    }
     It 'does not match a code against a fragment of the surrounding filename' {
         # every real name contains "client" and "secure"; nothing should latch on
         Get-ModuleCode -Name 'cisco-secure-client-win-5.1.16.194-mystery-predeploy-k9.msi' | Should -Be 'mod'
@@ -146,7 +166,13 @@ Describe 'New-InstallScript' {
         $kept = Select-KeptModule -Modules $script:SampleModules -KeepSpec 'all'
         $text = New-InstallScript -Kept $kept -HasOrgInfo $false
         $text | Should -Match 'exit 3010'
-        $text | Should -Match 'if \(\$script:failed\) \{ exit 1 \}'
+        $text | Should -Match 'exit \$script:firstFailure'
+    }
+    It 'returns the real msiexec code when an optional module fails' {
+        $kept = Select-KeptModule -Modules $script:SampleModules -KeepSpec 'all'
+        $text = New-InstallScript -Kept $kept -HasOrgInfo $false
+        # a generic 1 would hide the actual reason from the MDM
+        $text | Should -Match '\$script:firstFailure = \$p\.ExitCode'
     }
     It 'fails fast when the core module cannot install' {
         $kept = Select-KeptModule -Modules $script:SampleModules -KeepSpec 'umbrella'
@@ -185,12 +211,13 @@ Describe 'New-InstallScript' {
 }
 
 Describe 'New-UninstallScript' {
-    It 'removes the core VPN module last' {
+    It 'removes the core VPN module last, under either DisplayName spelling' {
         $text = New-UninstallScript
-        $optPos  = $text.IndexOf('-notlike ''*AnyConnect VPN*''')
-        $corePos = $text.IndexOf('-like ''*AnyConnect VPN*''')
+        $optPos  = $text.IndexOf('-not (')
+        $corePos = $text.LastIndexOf('Core VPN')
         $optPos  | Should -BeGreaterThan -1
         $corePos | Should -BeGreaterThan $optPos
+        $text | Should -Match '\*Core VPN\*'
     }
     It 'resolves product codes from the uninstall registry, not Win32_Product' {
         $text = New-UninstallScript
@@ -228,6 +255,27 @@ Describe 'New-DetectScript' {
         $kept = Select-KeptModule -Modules $script:SampleModules -KeepSpec 'vpn'
         $text = New-DetectScript -Kept $kept -BundleVersion '5.1.16.194'
         $text | Should -Not -Match 'modulePatterns'
+    }
+    It 'recognises the core client under either DisplayName spelling' {
+        $kept = Select-KeptModule -Modules $script:SampleModules -KeepSpec 'umbrella'
+        $text = New-DetectScript -Kept $kept -BundleVersion '5.1.16.194'
+        $text | Should -Match '\*AnyConnect VPN\*'
+        $text | Should -Match '\*Core VPN\*'
+    }
+    It 'tolerates a DisplayVersion carrying a suffix' {
+        $kept = Select-KeptModule -Modules $script:SampleModules -KeepSpec 'vpn'
+        $text = New-DetectScript -Kept $kept -BundleVersion '5.1.16.194'
+        # 5.1.10.233-k9 must not defeat the comparison
+        $text | Should -Match 'ConvertTo-ClientVersion'
+        $text | Should -Match [regex]::Escape('^\d+(\.\d+){0,3}')
+    }
+    It 'compares against the highest installed core version, not the first entry' {
+        $kept = Select-KeptModule -Modules $script:SampleModules -KeepSpec 'vpn'
+        $text = New-DetectScript -Kept $kept -BundleVersion '5.1.16.194'
+        $text | Should -Match 'Sort-Object -Descending'
+    }
+    It 'does not treat the core client as a pattern-matched module' {
+        Get-ModuleDisplayNamePattern -Code 'vpn' | Should -BeNullOrEmpty
     }
     It 'emits a script that parses' {
         $kept = Select-KeptModule -Modules $script:SampleModules -KeepSpec 'all'

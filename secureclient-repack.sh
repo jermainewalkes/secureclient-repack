@@ -33,7 +33,7 @@ if [[ -z "${SECURECLIENT_REPACK_TEST:-}" ]]; then
   set -euo pipefail
 fi
 
-VERSION="1.1.0"
+VERSION="1.1.1"
 
 # ---------- helpers -----------------------------------------------------------
 lower(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
@@ -324,7 +324,7 @@ verify_choices(){
 # pass — so the object check below is what pins it to JSON.
 check_orginfo(){
   local first k
-  first="$(tr -d '[:space:]' < "$1" | dd bs=1 count=1 2>/dev/null || true)"
+  first="$(tr -d '[:space:]' < "$1" | head -c 1)"
   [[ "$first" == "{" ]] || die "OrgInfo.json is not a JSON object: $1"
   plutil -convert xml1 "$1" -o /dev/null >/dev/null 2>&1 || die "OrgInfo.json is not valid JSON: $1"
   for k in organizationId fingerprint userId; do

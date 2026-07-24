@@ -25,7 +25,7 @@ setup() {
 @test "--version prints the version" {
   run env SECURECLIENT_REPACK_TEST= bash "$SCRIPT" --version
   [ "$status" -eq 0 ]
-  [ "$output" = "secureclient-repack 1.1.0" ]
+  [ "$output" = "secureclient-repack 1.1.1" ]
 }
 
 @test "unknown option fails with an error" {
