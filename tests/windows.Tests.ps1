@@ -1,17 +1,27 @@
 ﻿# Pester tests for secureclient-repack.ps1. The script is dot-sourced with
 # SECURECLIENT_REPACK_TEST set, which exposes its functions without running
-# the pipeline. No Cisco content is required — module lists are synthetic.
+# the pipeline. No Cisco content is required — module lists are synthetic, but
+# the filenames match the real predeploy shape so prefix-driven mismatches are
+# actually reachable.
 
 BeforeAll {
     $env:SECURECLIENT_REPACK_TEST = '1'
     . (Join-Path (Split-Path $PSScriptRoot -Parent) 'secureclient-repack.ps1')
 
     $script:SampleModules = @(
-        [pscustomobject]@{ Name = 'client-win-core-vpn-predeploy-k9.msi';  Code = 'vpn' },
-        [pscustomobject]@{ Name = 'client-win-umbrella-predeploy-k9.msi';  Code = 'umbrella' },
-        [pscustomobject]@{ Name = 'client-win-dart-predeploy-k9.msi';      Code = 'dart' },
-        [pscustomobject]@{ Name = 'client-win-nvm-predeploy-k9.msi';       Code = 'nvm' }
+        [pscustomobject]@{ Name = 'cisco-secure-client-win-5.1.16.194-core-vpn-predeploy-k9.msi'; Code = 'vpn' },
+        [pscustomobject]@{ Name = 'cisco-secure-client-win-5.1.16.194-umbrella-predeploy-k9.msi'; Code = 'umbrella' },
+        [pscustomobject]@{ Name = 'cisco-secure-client-win-5.1.16.194-dart-predeploy-k9.msi';     Code = 'dart' },
+        [pscustomobject]@{ Name = 'cisco-secure-client-win-5.1.16.194-nvm-predeploy-k9.msi';      Code = 'nvm' }
     )
+
+    # Parses generated script text the way PowerShell itself would.
+    function script:Test-GeneratedScript {
+        param([Parameter(Mandatory)][string]$Text)
+        $errors = $null
+        [void][System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$null, [ref]$errors)
+        return @($errors)
+    }
 }
 
 AfterAll {
@@ -20,20 +30,63 @@ AfterAll {
 
 Describe 'Get-ModuleCode' {
     It 'identifies the core VPN MSI' {
-        Get-ModuleCode -Name 'client-win-5.1.0.136-core-vpn-predeploy-k9.msi' | Should -Be 'vpn'
+        Get-ModuleCode -Name 'cisco-secure-client-win-5.1.16.194-core-vpn-predeploy-k9.msi' | Should -Be 'vpn'
     }
-    It 'identifies optional modules' {
-        Get-ModuleCode -Name 'client-win-5.1.0.136-umbrella-predeploy-k9.msi' | Should -Be 'umbrella'
-        Get-ModuleCode -Name 'client-win-5.1.0.136-dart-predeploy-k9.msi' | Should -Be 'dart'
-        Get-ModuleCode -Name 'client-win-5.1.0.136-nvm-predeploy-k9.msi' | Should -Be 'nvm'
-        Get-ModuleCode -Name 'client-win-5.1.0.136-thousandeyes-predeploy-k9.msi' | Should -Be 'te'
+    It 'identifies every optional module Cisco ships' {
+        $cases = @{
+            'umbrella'     = 'umbrella'
+            'dart'         = 'dart'
+            'iseposture'   = 'ise'
+            'nvm'          = 'nvm'
+            'thousandeyes' = 'te'
+            'zta'          = 'zta'
+            'amp'          = 'amp'
+            'nam'          = 'nam'
+            'sbl'          = 'sbl'
+            'websecurity'  = 'websecurity'
+        }
+        foreach ($token in $cases.Keys) {
+            $name = "cisco-secure-client-win-5.1.16.194-$token-predeploy-k9.msi"
+            Get-ModuleCode -Name $name | Should -Be $cases[$token] -Because "$name should map to $($cases[$token])"
+        }
     }
-    It 'distinguishes ISE posture from plain posture' {
-        Get-ModuleCode -Name 'client-win-5.1.0.136-iseposture-predeploy-k9.msi' | Should -Be 'ise'
-        Get-ModuleCode -Name 'client-win-5.1.0.136-posture-predeploy-k9.msi' | Should -Be 'posture'
+    It 'maps plain -posture- to Secure Firewall Posture, not the generic code' {
+        # Cisco ships Secure Firewall Posture as "-posture-", so a bundle that
+        # contains it must be selectable as sfp
+        Get-ModuleCode -Name 'cisco-secure-client-win-5.1.16.194-posture-predeploy-k9.msi' | Should -Be 'sfp'
     }
-    It 'falls back to mod for unknown MSIs' {
-        Get-ModuleCode -Name 'client-win-5.1.0.136-mystery-predeploy-k9.msi' | Should -Be 'mod'
+    It 'distinguishes ISE posture from Secure Firewall Posture' {
+        Get-ModuleCode -Name 'cisco-secure-client-win-5.1.16.194-iseposture-predeploy-k9.msi' | Should -Be 'ise'
+    }
+    It 'does not match a code against a fragment of the surrounding filename' {
+        # every real name contains "client" and "secure"; nothing should latch on
+        Get-ModuleCode -Name 'cisco-secure-client-win-5.1.16.194-mystery-predeploy-k9.msi' | Should -Be 'mod'
+        Get-ModuleCode -Name 'cisco-secure-client-win-5.1.16.194-ampere-predeploy-k9.msi'  | Should -Be 'mod'
+        Get-ModuleCode -Name 'cisco-secure-client-win-5.1.16.194-namespace-predeploy-k9.msi' | Should -Be 'mod'
+    }
+}
+
+Describe 'Test-SafeMsiName' {
+    It 'accepts real predeploy filenames' {
+        Test-SafeMsiName -Name 'cisco-secure-client-win-5.1.16.194-core-vpn-predeploy-k9.msi' | Should -BeTrue
+    }
+    It 'rejects names carrying PowerShell metacharacters' {
+        Test-SafeMsiName -Name 'core-vpn$(hostname).msi'   | Should -BeFalse
+        Test-SafeMsiName -Name "core-vpn'; iex 'x'.msi"    | Should -BeFalse
+        Test-SafeMsiName -Name 'core-vpn`whoami`.msi'      | Should -BeFalse
+        Test-SafeMsiName -Name 'core-vpn.msi.exe'          | Should -BeFalse
+        Test-SafeMsiName -Name 'sub\dir\core-vpn.msi'      | Should -BeFalse
+    }
+}
+
+Describe 'ConvertTo-PsSingleQuoted' {
+    It 'doubles embedded single quotes' {
+        ConvertTo-PsSingleQuoted -Text "it's" | Should -Be "'it''s'"
+    }
+    It 'produces a literal that evaluates back to the original text' {
+        $original = "weird'name`$(1+1).msi"
+        $literal  = ConvertTo-PsSingleQuoted -Text $original
+        [scriptblock]::Create($literal).Invoke()[0] | Should -Be $original
     }
 }
 
@@ -79,6 +132,23 @@ Describe 'New-InstallScript' {
         $text = New-InstallScript -Kept $kept -HasOrgInfo $false
         $text | Should -Match '/qn /norestart'
     }
+    It 'checks the msiexec exit code instead of assuming success' {
+        $kept = Select-KeptModule -Modules $script:SampleModules -KeepSpec 'all'
+        $text = New-InstallScript -Kept $kept -HasOrgInfo $false
+        $text | Should -Match '-PassThru'
+        $text | Should -Match '\$p\.ExitCode'
+    }
+    It 'propagates a required reboot as 3010 and a failure as non-zero' {
+        $kept = Select-KeptModule -Modules $script:SampleModules -KeepSpec 'all'
+        $text = New-InstallScript -Kept $kept -HasOrgInfo $false
+        $text | Should -Match 'exit 3010'
+        $text | Should -Match 'if \(\$script:failed\) \{ exit 1 \}'
+    }
+    It 'fails fast when the core module cannot install' {
+        $kept = Select-KeptModule -Modules $script:SampleModules -KeepSpec 'umbrella'
+        $text = New-InstallScript -Kept $kept -HasOrgInfo $false
+        $text | Should -Match 'Install-Msi -FileName ''[^'']*core-vpn[^'']*'' -Required'
+    }
     It 'drops OrgInfo.json to the Umbrella ProgramData path when requested' {
         $kept = Select-KeptModule -Modules $script:SampleModules -KeepSpec 'umbrella'
         $text = New-InstallScript -Kept $kept -HasOrgInfo $true
@@ -90,31 +160,102 @@ Describe 'New-InstallScript' {
         $text = New-InstallScript -Kept $kept -HasOrgInfo $false
         $text | Should -Not -Match 'OrgInfo'
     }
+    It 'emits a script that parses' {
+        $kept = Select-KeptModule -Modules $script:SampleModules -KeepSpec 'all'
+        $text = New-InstallScript -Kept $kept -HasOrgInfo $true
+        (Test-GeneratedScript -Text $text).Count | Should -Be 0
+    }
+    It 'cannot be broken out of by a hostile MSI filename' {
+        # the repack refuses such names outright, but the generator must not be
+        # the only thing standing between a bundle and code running as SYSTEM
+        $hostile = @(
+            [pscustomobject]@{ Name = 'core-vpn$(Write-Output PWNED).msi'; Code = 'vpn' },
+            [pscustomobject]@{ Name = "umbrella'; Write-Output PWNED; '.msi"; Code = 'umbrella' }
+        )
+        $text = New-InstallScript -Kept $hostile -HasOrgInfo $false
+        (Test-GeneratedScript -Text $text).Count | Should -Be 0
+        # the payload survives only as inert literal text, never as a command
+        $text | Should -Not -Match '(?m)^\s*Write-Output PWNED'
+        $text | Should -Match ([regex]::Escape('$(Write-Output PWNED)'))
+    }
 }
 
 Describe 'New-UninstallScript' {
     It 'removes the core VPN module last' {
-        $kept = Select-KeptModule -Modules $script:SampleModules -KeepSpec 'umbrella'
-        $text = New-UninstallScript -Kept $kept
-        $corePos = $text.IndexOf('core-vpn-predeploy')
-        $umbPos  = $text.IndexOf('umbrella-predeploy')
-        $umbPos  | Should -BeGreaterThan -1
-        $corePos | Should -BeGreaterThan $umbPos
+        $text = New-UninstallScript
+        $optPos  = $text.IndexOf('-notlike ''*AnyConnect VPN*''')
+        $corePos = $text.IndexOf('-like ''*AnyConnect VPN*''')
+        $optPos  | Should -BeGreaterThan -1
+        $corePos | Should -BeGreaterThan $optPos
     }
-    It 'uninstalls quietly via msiexec /x' {
-        $kept = Select-KeptModule -Modules $script:SampleModules -KeepSpec 'dart'
-        $text = New-UninstallScript -Kept $kept
-        $text | Should -Match '/x \$\(\$app\.IdentifyingNumber\) /qn /norestart'
+    It 'resolves product codes from the uninstall registry, not Win32_Product' {
+        $text = New-UninstallScript
+        $text | Should -Match 'CurrentVersion\\Uninstall'
+        $text | Should -Match 'WOW6432Node'
+        $text | Should -Not -Match 'Win32_Product'
+    }
+    It 'uninstalls quietly by product code and checks the exit code' {
+        $text = New-UninstallScript
+        $text | Should -Match '/x \$\(\$e\.PSChildName\) /qn /norestart'
+        $text | Should -Match '-PassThru'
+        $text | Should -Match 'exit 3010'
+    }
+    It 'emits a script that parses' {
+        (Test-GeneratedScript -Text (New-UninstallScript)).Count | Should -Be 0
     }
 }
 
 Describe 'New-DetectScript' {
-    It 'detects via the vpnagent binary or the uninstall registry entries' {
-        $text = New-DetectScript
-        $text | Should -Match 'vpnagent\.exe'
-        $text | Should -Match 'CurrentVersion\\Uninstall'
-        $text | Should -Match 'exit 0'
+    It 'requires the installed version to be at least the packaged one' {
+        $kept = Select-KeptModule -Modules $script:SampleModules -KeepSpec 'umbrella'
+        $text = New-DetectScript -Kept $kept -BundleVersion '5.1.16.194'
+        $text | Should -Match ([regex]::Escape("'5.1.16.194'"))
+        $text | Should -Match '\$installed -lt \$wanted'
         $text | Should -Match 'exit 1'
+        $text | Should -Match 'exit 0'
+    }
+    It 'requires each kept optional module to be present' {
+        $kept = Select-KeptModule -Modules $script:SampleModules -KeepSpec 'umbrella, dart'
+        $text = New-DetectScript -Kept $kept -BundleVersion '5.1.16.194'
+        $text | Should -Match '\*Umbrella\*'
+        $text | Should -Match '\*Diagnostic\*'
+    }
+    It 'checks only the core client when nothing else is kept' {
+        $kept = Select-KeptModule -Modules $script:SampleModules -KeepSpec 'vpn'
+        $text = New-DetectScript -Kept $kept -BundleVersion '5.1.16.194'
+        $text | Should -Not -Match 'modulePatterns'
+    }
+    It 'emits a script that parses' {
+        $kept = Select-KeptModule -Modules $script:SampleModules -KeepSpec 'all'
+        (Test-GeneratedScript -Text (New-DetectScript -Kept $kept -BundleVersion '5.1.16.194')).Count | Should -Be 0
+    }
+}
+
+Describe 'Expand-ArchiveSafely' {
+    It 'extracts a well-formed archive' {
+        $src = Join-Path $TestDrive 'src'
+        New-Item -ItemType Directory -Path $src | Out-Null
+        Set-Content -LiteralPath (Join-Path $src 'a.msi') -Value 'x'
+        $zip = Join-Path $TestDrive 'good.zip'
+        Compress-Archive -Path (Join-Path $src '*') -DestinationPath $zip
+        $dest = Join-Path $TestDrive 'out-good'
+        New-Item -ItemType Directory -Path $dest | Out-Null
+        Expand-ArchiveSafely -Path $zip -Destination $dest
+        Test-Path -LiteralPath (Join-Path $dest 'a.msi') | Should -BeTrue
+    }
+    It 'refuses an entry whose path escapes the destination' {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zip = Join-Path $TestDrive 'evil.zip'
+        $archive = [IO.Compression.ZipFile]::Open($zip, 'Create')
+        try {
+            $entry = $archive.CreateEntry('..\escaped.msi')
+            $writer = New-Object IO.StreamWriter($entry.Open())
+            $writer.Write('x'); $writer.Dispose()
+        } finally { $archive.Dispose() }
+        $dest = Join-Path $TestDrive 'out-evil'
+        New-Item -ItemType Directory -Path $dest | Out-Null
+        { Expand-ArchiveSafely -Path $zip -Destination $dest } |
+            Should -Throw '*escapes the work directory*'
     }
 }
 

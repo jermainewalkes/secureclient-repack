@@ -7,7 +7,9 @@ Locates the Cisco Secure Client predeploy zip (a bundle of per-module MSIs),
 lets you choose which modules to keep (the core VPN MSI is pinned) and emits
 a deployment folder containing the kept MSIs plus generated install.ps1,
 uninstall.ps1 and detect.ps1 scripts suitable for Intune Win32 apps and
-other MDMs. The MSIs are already signed by Cisco, so nothing is re-signed.
+other MDMs. The MSIs are shipped unmodified; their Authenticode signatures
+are checked and reported, and anything not validly signed is refused unless
+-AllowUnsignedMsi is given.
 
 If the Umbrella module is kept, an OrgInfo.json can be embedded so that
 install.ps1 drops it to %ProgramData%\Cisco\Cisco Secure Client\Umbrella.
@@ -39,6 +41,12 @@ SearchDir; pass it explicitly for scripted runs.
 Directory to write the deployment folder into. Defaults to the directory
 containing the zip.
 
+.PARAMETER Force
+Replace an existing deployment folder of the same name.
+
+.PARAMETER AllowUnsignedMsi
+Continue even when a kept MSI has no valid Authenticode signature.
+
 .PARAMETER IntuneWin
 Wrap the deployment folder into an .intunewin package. Requires
 IntuneWinAppUtil.exe on PATH or via -IntuneWinAppUtil. The tool is never
@@ -63,7 +71,7 @@ Print the tool version and exit.
 .\secureclient-repack.ps1 -Zip C:\pkgs\csc-predeploy.zip -Keep all -Output C:\out
 #>
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
-    Justification = 'Interactive console tool; host output is the interface')]
+    Justification = 'Interactive console tool. Status must go to the host: Write-Output would land in the return value of every function that emits progress.')]
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [string]$Zip,
@@ -71,6 +79,8 @@ param(
     [string]$Keep,
     [string]$OrgInfo,
     [string]$Output,
+    [switch]$Force,
+    [switch]$AllowUnsignedMsi,
     [switch]$IntuneWin,
     [string]$IntuneWinAppUtil,
     [switch]$Yes,
@@ -80,7 +90,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:ToolVersion = '1.0.0'
+$script:ToolVersion = '1.1.0'
 
 if ($Version) {
     Write-Output "secureclient-repack $script:ToolVersion"
@@ -89,22 +99,37 @@ if ($Version) {
 
 # ---------- module vocabulary --------------------------------------------------
 function Get-ModuleCode {
+    <#
+    .SYNOPSIS
+    Map a predeploy MSI filename to a module code.
+    .DESCRIPTION
+    Canonical names look like cisco-secure-client-win-<version>-<module>-predeploy-k9.msi.
+    The module token is extracted first and matched with hyphen boundaries, so a
+    code can never match a fragment of an unrelated word or a future rename of
+    the surrounding filename.
+    #>
     param([Parameter(Mandatory)][string]$Name)
     $n = $Name.ToLowerInvariant()
-    if ($n -match 'core.*vpn|vpn.*core|anyconnect.*core') { return 'vpn' }
-    if ($n -match 'umbrella')                    { return 'umbrella' }
-    if ($n -match 'dart')                        { return 'dart' }
-    if ($n -match 'iseposture|ise-posture')      { return 'ise' }
-    if ($n -match 'nvm|network.?visibility')     { return 'nvm' }
-    if ($n -match 'thousandeyes')                { return 'te' }
-    if ($n -match 'zta|zero.?trust')             { return 'zta' }
-    if ($n -match 'fireamp|amp')                 { return 'amp' }
-    if ($n -match 'firewall.?posture|hostscan')  { return 'sfp' }
-    if ($n -match 'posture')                     { return 'posture' }
-    if ($n -match 'nam|network.?access')         { return 'nam' }
-    if ($n -match 'sbl|start.?before')           { return 'sbl' }
-    if ($n -match 'websecurity')                 { return 'websecurity' }
-    return 'mod'
+    $m = [regex]::Match($n, '-\d+(\.\d+)+-(?<mod>.+?)-predeploy')
+    $token = if ($m.Success) { $m.Groups['mod'].Value } else { $n }
+
+    # ISE Posture must be tested before Secure Firewall Posture: Cisco ships the
+    # latter as plain "-posture-", the former as "-iseposture-".
+    switch -Regex ($token) {
+        '(^|-)(core-vpn|vpn-core|anyconnect-core)($|-)' { return 'vpn' }
+        '(^|-)umbrella($|-)'                           { return 'umbrella' }
+        '(^|-)dart($|-)'                               { return 'dart' }
+        '(^|-)(iseposture|ise-posture)($|-)'            { return 'ise' }
+        '(^|-)(nvm|networkvisibility)($|-)'             { return 'nvm' }
+        '(^|-)thousandeyes($|-)'                       { return 'te' }
+        '(^|-)(zta|zerotrust)($|-)'                     { return 'zta' }
+        '(^|-)(fireamp|amp)($|-)'                       { return 'amp' }
+        '(^|-)(posture|firewallposture|hostscan)($|-)'  { return 'sfp' }
+        '(^|-)(nam|networkaccess)($|-)'                 { return 'nam' }
+        '(^|-)(sbl|startbeforelogin)($|-)'              { return 'sbl' }
+        '(^|-)websecurity($|-)'                        { return 'websecurity' }
+        default                                        { return 'mod' }
+    }
 }
 
 function Get-ModuleFriendlyName {
@@ -119,7 +144,6 @@ function Get-ModuleFriendlyName {
         'zta'         { 'Zero Trust Access' }
         'amp'         { 'AMP Enabler / Secure Endpoint' }
         'sfp'         { 'Secure Firewall Posture' }
-        'posture'     { 'Posture' }
         'nam'         { 'Network Access Manager' }
         'sbl'         { 'Start Before Login' }
         'websecurity' { 'Web Security (deprecated)' }
@@ -127,9 +151,97 @@ function Get-ModuleFriendlyName {
     }
 }
 
+function Get-ModuleDisplayNamePattern {
+    <#
+    .SYNOPSIS
+    The Add/Remove Programs DisplayName pattern for a module code.
+    .DESCRIPTION
+    Used by the generated detect.ps1 to confirm a kept module is actually
+    installed. Returns $null for codes with no dependable pattern, in which case
+    detection falls back to the core client only.
+    #>
+    param([Parameter(Mandatory)][string]$Code)
+    switch ($Code) {
+        'vpn'      { '*AnyConnect VPN*' }
+        'umbrella' { '*Umbrella*' }
+        'dart'     { '*Diagnostic*' }
+        'ise'      { '*ISE Posture*' }
+        'nvm'      { '*Network Visibility*' }
+        'te'       { '*ThousandEyes*' }
+        'zta'      { '*Zero Trust*' }
+        'amp'      { '*AMP Enabler*' }
+        'sfp'      { '*Secure Firewall Posture*' }
+        'nam'      { '*Network Access Manager*' }
+        'sbl'      { '*Start Before Login*' }
+        default    { $null }
+    }
+}
+
 function Test-PinnedModule {
     param([Parameter(Mandatory)][string]$Code)
     return $Code -eq 'vpn'
+}
+
+# ---------- safety helpers ------------------------------------------------------
+function Test-SafeMsiName {
+    <#
+    .SYNOPSIS
+    Is this MSI filename safe to embed in a generated script and ship?
+    .DESCRIPTION
+    NTFS permits $ ( ) ` and ' in filenames, all of which are live inside
+    PowerShell string literals. Names are constrained rather than escaped alone,
+    so a hostile bundle cannot smuggle anything into the artefacts an MDM runs
+    elevated on every endpoint.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+    return $Name -match '^[A-Za-z0-9._-]+\.msi$'
+}
+
+function ConvertTo-PsSingleQuoted {
+    <#
+    .SYNOPSIS
+    Render a string as a PowerShell single-quoted literal.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    return "'" + $Text.Replace("'", "''") + "'"
+}
+
+function Expand-ArchiveSafely {
+    <#
+    .SYNOPSIS
+    Extract a zip, refusing any entry whose path escapes the destination.
+    .DESCRIPTION
+    Expand-Archive in the Microsoft.PowerShell.Archive module shipped with
+    Windows PowerShell 5.1 joins the destination with the entry name without
+    checking the result stays inside it, so an entry called ..\..\somewhere
+    writes outside the work directory (zip slip).
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Destination
+    )
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $root = [IO.Path]::GetFullPath($Destination)
+    if (-not $root.EndsWith([IO.Path]::DirectorySeparatorChar)) {
+        $root += [IO.Path]::DirectorySeparatorChar
+    }
+    $archive = [IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        foreach ($entry in $archive.Entries) {
+            if (-not $entry.Name) { continue }   # directory entry
+            $full = [IO.Path]::GetFullPath((Join-Path $Destination $entry.FullName))
+            if (-not $full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Refusing archive entry that escapes the work directory: $($entry.FullName)"
+            }
+            $dir = Split-Path -Parent $full
+            if (-not (Test-Path -LiteralPath $dir)) {
+                New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            }
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $full, $true)
+        }
+    } finally {
+        $archive.Dispose()
+    }
 }
 
 # ---------- selection logic (testable) ------------------------------------------
@@ -188,17 +300,47 @@ function New-InstallScript {
         [Parameter(Mandatory)][object[]]$Kept,
         [bool]$HasOrgInfo
     )
-    $core  = @($Kept | Where-Object { Test-PinnedModule -Code $_.Code })
-    $rest  = @($Kept | Where-Object { -not (Test-PinnedModule -Code $_.Code) })
+    $core = @($Kept | Where-Object { Test-PinnedModule -Code $_.Code })
+    $rest = @($Kept | Where-Object { -not (Test-PinnedModule -Code $_.Code) })
+
     $lines = @(
         '# install.ps1 — generated by secureclient-repack',
         '# Installs the kept Cisco Secure Client modules. Core VPN installs first.',
+        '# Exit codes: 0 success, 3010 success but a reboot is required, otherwise',
+        '# the failing msiexec code.',
         '$ErrorActionPreference = ''Stop''',
         '$here = Split-Path -Parent $MyInvocation.MyCommand.Path',
+        '$script:rebootRequired = $false',
+        '$script:failed = $false',
+        '',
+        'function Install-Msi {',
+        '    param([string]$FileName, [switch]$Required)',
+        '    $path = Join-Path $here $FileName',
+        '    if (-not (Test-Path -LiteralPath $path)) {',
+        '        Write-Output "missing installer: $FileName"',
+        '        if ($Required) { exit 1 }',
+        '        $script:failed = $true',
+        '        return',
+        '    }',
+        '    $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList "/package `"$path`" /qn /norestart"',
+        '    switch ($p.ExitCode) {',
+        '        0    { Write-Output "installed: $FileName" }',
+        '        3010 { Write-Output "installed, reboot required: $FileName"; $script:rebootRequired = $true }',
+        '        1641 { Write-Output "installed, reboot initiated: $FileName"; $script:rebootRequired = $true }',
+        '        default {',
+        '            Write-Output "FAILED ($($p.ExitCode)): $FileName"',
+        '            if ($Required) { exit $p.ExitCode }',
+        '            $script:failed = $true',
+        '        }',
+        '    }',
+        '}',
         ''
     )
-    foreach ($m in ($core + $rest)) {
-        $lines += 'Start-Process msiexec.exe -Wait -ArgumentList "/package `"$here\' + $m.Name + '`" /qn /norestart"'
+    foreach ($m in $core) {
+        $lines += ('Install-Msi -FileName {0} -Required' -f (ConvertTo-PsSingleQuoted $m.Name))
+    }
+    foreach ($m in $rest) {
+        $lines += ('Install-Msi -FileName {0}' -f (ConvertTo-PsSingleQuoted $m.Name))
     }
     if ($HasOrgInfo) {
         $lines += @(
@@ -211,48 +353,112 @@ function New-InstallScript {
             'Copy-Item -LiteralPath (Join-Path $here ''OrgInfo.json'') -Destination (Join-Path $umbrellaDir ''OrgInfo.json'') -Force'
         )
     }
-    $lines += @('', 'exit 0')
+    $lines += @(
+        '',
+        'if ($script:failed) { exit 1 }',
+        'if ($script:rebootRequired) { exit 3010 }',
+        'exit 0'
+    )
     return ($lines -join "`r`n")
 }
 
 function New-UninstallScript {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
         Justification = 'Returns script text; writes nothing itself')]
-    param([Parameter(Mandatory)][object[]]$Kept)
-    $core = @($Kept | Where-Object { Test-PinnedModule -Code $_.Code })
-    $rest = @($Kept | Where-Object { -not (Test-PinnedModule -Code $_.Code) })
+    param()
+    # Resolved from the uninstall registry keys rather than Win32_Product:
+    # Win32_Product triggers an MSI consistency check of every installed product
+    # on the machine, and matching on the source MSI filename cannot remove a
+    # client that a different version (or Cisco's own setup.exe) installed.
     $lines = @(
         '# uninstall.ps1 — generated by secureclient-repack',
-        '# Removes the kept Cisco Secure Client modules. Core VPN is removed last.',
+        '# Removes every installed Cisco Secure Client module. Core VPN goes last.',
         '$ErrorActionPreference = ''Stop''',
-        ''
+        '$keys = @(',
+        '    ''HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'',',
+        '    ''HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*''',
+        ')',
+        '$entries = @(Get-ItemProperty -Path $keys -ErrorAction SilentlyContinue |',
+        '    Where-Object { $_.DisplayName -like ''Cisco Secure Client*'' -and $_.PSChildName -match ''^\{[0-9A-Fa-f-]+\}$'' } |',
+        '    Sort-Object -Property PSChildName -Unique)',
+        'if (-not $entries) { Write-Output ''nothing to uninstall''; exit 0 }',
+        '',
+        '# optional modules first, the core client last',
+        '$ordered = @($entries | Where-Object { $_.DisplayName -notlike ''*AnyConnect VPN*'' }) +',
+        '           @($entries | Where-Object { $_.DisplayName -like ''*AnyConnect VPN*'' })',
+        '$rebootRequired = $false',
+        '$failed = $false',
+        'foreach ($e in $ordered) {',
+        '    $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList "/x $($e.PSChildName) /qn /norestart"',
+        '    switch ($p.ExitCode) {',
+        '        0    { Write-Output "removed: $($e.DisplayName)" }',
+        '        3010 { Write-Output "removed, reboot required: $($e.DisplayName)"; $rebootRequired = $true }',
+        '        1605 { Write-Output "not installed: $($e.DisplayName)" }',
+        '        default { Write-Output "FAILED ($($p.ExitCode)): $($e.DisplayName)"; $failed = $true }',
+        '    }',
+        '}',
+        'if ($failed) { exit 1 }',
+        'if ($rebootRequired) { exit 3010 }',
+        'exit 0'
     )
-    # Reverse order: optional modules first, core last.
-    foreach ($m in ($rest + $core)) {
-        $lines += '$app = Get-CimInstance Win32_Product -Filter "Name LIKE ''%Cisco Secure Client%''" | Where-Object { $_.PackageName -eq ''' + $m.Name + ''' }'
-        $lines += 'if ($app) { Start-Process msiexec.exe -Wait -ArgumentList "/x $($app.IdentifyingNumber) /qn /norestart" }'
-        $lines += ''
-    }
-    $lines += 'exit 0'
     return ($lines -join "`r`n")
 }
 
 function New-DetectScript {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
         Justification = 'Returns script text; writes nothing itself')]
-    param()
+    param(
+        [Parameter(Mandatory)][object[]]$Kept,
+        [Parameter(Mandatory)][string]$BundleVersion
+    )
+    # Detection must be version-aware: reporting "installed" for any Cisco Secure
+    # Client at all means an upgrade is never delivered, because the MDM sees the
+    # older client already present and skips the install.
+    $patterns = @($Kept |
+        ForEach-Object { Get-ModuleDisplayNamePattern -Code $_.Code } |
+        Where-Object { $_ -and $_ -ne '*AnyConnect VPN*' } |
+        Sort-Object -Unique)
+
     $lines = @(
         '# detect.ps1 — generated by secureclient-repack',
-        '# Intune Win32 detection: succeeds (exit 0 with output) when the core',
-        '# Cisco Secure Client VPN agent is present.',
-        '$exe = Join-Path ${env:ProgramFiles(x86)} ''Cisco\Cisco Secure Client\vpnagent.exe''',
-        '$reg = Get-ItemProperty ''HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'', ''HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'' -ErrorAction SilentlyContinue |',
-        '    Where-Object { $_.DisplayName -like ''Cisco Secure Client*'' }',
-        'if ((Test-Path -LiteralPath $exe) -or $reg) {',
-        '    Write-Output ''Cisco Secure Client detected''',
-        '    exit 0',
-        '}',
-        'exit 1'
+        '# Intune Win32 detection: exit 0 with output when the expected client',
+        '# version and modules are present, otherwise exit 1.',
+        '# The DisplayName patterns below come from Add/Remove Programs; adjust',
+        '# them here if your Cisco build labels a module differently.',
+        '$ErrorActionPreference = ''Stop''',
+        ('$wantedVersion = ' + (ConvertTo-PsSingleQuoted $BundleVersion)),
+        '$keys = @(',
+        '    ''HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'',',
+        '    ''HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*''',
+        ')',
+        '$entries = @(Get-ItemProperty -Path $keys -ErrorAction SilentlyContinue |',
+        '    Where-Object { $_.DisplayName -like ''Cisco Secure Client*'' })',
+        '$core = @($entries | Where-Object { $_.DisplayName -like ''*AnyConnect VPN*'' })',
+        'if (-not $core) { exit 1 }',
+        '',
+        '# the installed core must be at least the version this package carries',
+        '$installed = $null',
+        '[void][version]::TryParse(([string]$core[0].DisplayVersion), [ref]$installed)',
+        '$wanted = $null',
+        '[void][version]::TryParse($wantedVersion, [ref]$wanted)',
+        'if ($null -eq $installed -or $null -eq $wanted) { exit 1 }',
+        'if ($installed -lt $wanted) { exit 1 }'
+    )
+    if ($patterns.Count -gt 0) {
+        $lines += @(
+            '',
+            '# every kept module must be present too, so adding one to an existing',
+            '# install is still delivered',
+            ('$modulePatterns = @(' + (($patterns | ForEach-Object { ConvertTo-PsSingleQuoted $_ }) -join ', ') + ')'),
+            'foreach ($pattern in $modulePatterns) {',
+            '    if (-not ($entries | Where-Object { $_.DisplayName -like $pattern })) { exit 1 }',
+            '}'
+        )
+    }
+    $lines += @(
+        '',
+        'Write-Output "Cisco Secure Client $installed detected"',
+        'exit 0'
     )
     return ($lines -join "`r`n")
 }
@@ -299,10 +505,22 @@ $work = Join-Path ([IO.Path]::GetTempPath()) ('secureclient-repack-' + [IO.Path]
 New-Item -ItemType Directory -Path $work | Out-Null
 try {
     Write-Host '== Extracting =='
-    Expand-Archive -LiteralPath $zipPath -DestinationPath $work -Force
+    Expand-ArchiveSafely -Path $zipPath -Destination $work
 
     $msis = @(Get-ChildItem -Path $work -Recurse -File -Filter '*.msi' | Sort-Object Name)
     if ($msis.Count -eq 0) { throw 'No MSIs found in the predeploy zip.' }
+
+    $unsafe = @($msis | Where-Object { -not (Test-SafeMsiName -Name $_.Name) })
+    if ($unsafe) {
+        throw ("Refusing MSI filenames that are unsafe to embed in the generated scripts: " +
+               (($unsafe | ForEach-Object { $_.Name }) -join ', '))
+    }
+
+    $duplicates = @($msis | Group-Object Name | Where-Object { $_.Count -gt 1 })
+    if ($duplicates) {
+        throw ("The bundle contains repeated MSI filenames, so the wrong copy could be shipped: " +
+               (($duplicates | ForEach-Object { $_.Name }) -join ', '))
+    }
 
     $modules = @($msis | ForEach-Object {
         [pscustomobject]@{
@@ -320,13 +538,13 @@ try {
         $kept = Select-KeptModule -Modules $modules -KeepSpec $Keep
     } else {
         $state = @{}
-        foreach ($m in $modules) { $state[$m.Name] = (Test-PinnedModule -Code $m.Code) }
+        foreach ($m in $modules) { $state[$m.Path] = (Test-PinnedModule -Code $m.Code) }
         while ($true) {
             Write-Host ''
             Write-Host 'Modules in this bundle — choose which to KEEP (pinned = required base):'
             Write-Host ''
             for ($i = 0; $i -lt $modules.Count; $i++) {
-                $mark = if ($state[$modules[$i].Name]) { 'x' } else { ' ' }
+                $mark = if ($state[$modules[$i].Path]) { 'x' } else { ' ' }
                 Write-Host ("  {0,2}) [{1}] {2}" -f ($i + 1), $mark, (Get-ModuleFriendlyName -Code $modules[$i].Code))
             }
             Write-Host ''
@@ -334,8 +552,8 @@ try {
             $reply = Read-Host '>'
             if (-not $reply) { break }
             switch -Regex ($reply.Trim()) {
-                '^[aA]$' { foreach ($m in $modules) { $state[$m.Name] = $true } }
-                '^[nN]$' { foreach ($m in $modules) { $state[$m.Name] = (Test-PinnedModule -Code $m.Code) } }
+                '^[aA]$' { foreach ($m in $modules) { $state[$m.Path] = $true } }
+                '^[nN]$' { foreach ($m in $modules) { $state[$m.Path] = (Test-PinnedModule -Code $m.Code) } }
                 default {
                     foreach ($tok in ($reply -split '\s+')) {
                         if ($tok -notmatch '^\d+$') { Write-Host "  ignoring '$tok'"; continue }
@@ -344,13 +562,13 @@ try {
                         if (Test-PinnedModule -Code $modules[$idx].Code) {
                             Write-Host ("  {0} is a pinned base component and stays selected." -f $modules[$idx].Name)
                         } else {
-                            $state[$modules[$idx].Name] = -not $state[$modules[$idx].Name]
+                            $state[$modules[$idx].Path] = -not $state[$modules[$idx].Path]
                         }
                     }
                 }
             }
         }
-        $kept = @($modules | Where-Object { $state[$_.Name] })
+        $kept = @($modules | Where-Object { $state[$_.Path] })
     }
 
     $tag = ($kept | ForEach-Object { $_.Code } | Sort-Object -Unique) -join '-'
@@ -358,7 +576,30 @@ try {
     Write-Host "Keeping: $tag"
     $umbrellaKept = [bool]($kept | Where-Object { $_.Code -eq 'umbrella' })
 
-    # ---------- 4. OrgInfo.json ------------------------------------------------------
+    # ---------- 4. Authenticode check ------------------------------------------------
+    Write-Host ''
+    Write-Host '== Checking MSI signatures =='
+    $badlySigned = @()
+    foreach ($m in $kept) {
+        $sig = Get-AuthenticodeSignature -LiteralPath $m.Path
+        if ($sig.Status -eq 'Valid') {
+            Write-Host ("  ok      {0} — {1}" -f $m.Name, $sig.SignerCertificate.Subject)
+        } else {
+            Write-Host ("  UNSAFE  {0} — signature status: {1}" -f $m.Name, $sig.Status)
+            $badlySigned += $m
+        }
+    }
+    if ($badlySigned) {
+        if ($AllowUnsignedMsi) {
+            Write-Warning ("Continuing with {0} MSI(s) that are not validly signed (-AllowUnsignedMsi)." -f $badlySigned.Count)
+        } else {
+            throw ("These MSIs are not validly signed, so they will not be packaged: " +
+                   (($badlySigned | ForEach-Object { $_.Name }) -join ', ') +
+                   ". Re-download the bundle from Cisco, or pass -AllowUnsignedMsi if this is a deliberately re-signed internal build.")
+        }
+    }
+
+    # ---------- 5. OrgInfo.json ------------------------------------------------------
     $orgPath = $null
     if ($umbrellaKept) {
         Write-Host ''
@@ -389,14 +630,15 @@ try {
         if ($orgPath) { Test-OrgInfoFile -Path $orgPath | Out-Null }
     }
 
-    # ---------- 5. emit the deployment folder ----------------------------------------
+    # ---------- 6. emit the deployment folder ----------------------------------------
     $deployName = "SecureClient-$bundleVersion-$tag"
     $deployDir = Join-Path $Output $deployName
     if (Test-Path -LiteralPath $deployDir) {
+        if (-not $Force) {
+            throw "Output folder already exists: $deployDir (pass -Force to replace it)"
+        }
         if ($PSCmdlet.ShouldProcess($deployDir, 'Replace existing deployment folder')) {
             Remove-Item -LiteralPath $deployDir -Recurse -Force
-        } else {
-            throw "Output folder already exists: $deployDir"
         }
     }
     New-Item -ItemType Directory -Path $deployDir | Out-Null
@@ -405,8 +647,8 @@ try {
     if ($orgPath) { Copy-Item -LiteralPath $orgPath -Destination (Join-Path $deployDir 'OrgInfo.json') }
 
     Set-Content -LiteralPath (Join-Path $deployDir 'install.ps1')   -Value (New-InstallScript -Kept $kept -HasOrgInfo:([bool]$orgPath)) -Encoding UTF8
-    Set-Content -LiteralPath (Join-Path $deployDir 'uninstall.ps1') -Value (New-UninstallScript -Kept $kept) -Encoding UTF8
-    Set-Content -LiteralPath (Join-Path $deployDir 'detect.ps1')    -Value (New-DetectScript) -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $deployDir 'uninstall.ps1') -Value (New-UninstallScript) -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $deployDir 'detect.ps1')    -Value (New-DetectScript -Kept $kept -BundleVersion $bundleVersion) -Encoding UTF8
 
     Write-Host ''
     Write-Host 'Deployment folder contents:'
@@ -415,7 +657,7 @@ try {
         $null = Read-Host 'Folder correct? Enter to continue, Ctrl-C to abort'
     }
 
-    # ---------- 6. optional .intunewin wrap -------------------------------------------
+    # ---------- 7. optional .intunewin wrap -------------------------------------------
     if ($IntuneWin) {
         $tool = $null
         if ($IntuneWinAppUtil) {
@@ -444,7 +686,10 @@ try {
     Write-Host 'Next steps:'
     Write-Host '  - Upload as a Win32 app (or wrap with -IntuneWin) using install.ps1,'
     Write-Host '    uninstall.ps1 and detect.ps1.'
-    Write-Host '  - Core VPN installs first; the remaining MSIs follow automatically.'
+    Write-Host '  - install.ps1 returns 3010 when a reboot is required; map that to'
+    Write-Host '    "soft reboot" in your MDM so the client finishes cleanly.'
+    Write-Host '  - detect.ps1 checks the installed version, so upgrades are delivered.'
+    Write-Host '    Verify its DisplayName patterns against a pilot device once.'
     if ($umbrellaKept) {
         Write-Host '  - Umbrella consumes OrgInfo.json on first launch. On a client already'
         Write-Host '    registered, clear the adjacent "data" directory to force re-registration.'

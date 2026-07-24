@@ -7,6 +7,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   macos:
     name: macOS (shellcheck + bats)
@@ -31,6 +34,17 @@ jobs:
       - name: Bats tests
         run: bats tests/macos.bats
 
+      - name: End-to-end against a synthetic package
+        run: |
+          set -euo pipefail
+          bash tests/e2e/build-fixture-dmg.sh "$RUNNER_TEMP/fixture"
+          ./secureclient-repack.sh \
+            --dmg "$RUNNER_TEMP/fixture/Example Secure Client-9.9.9.9.dmg" \
+            --keep umbrella --yes --no-sign \
+            --orginfo "$RUNNER_TEMP/fixture/OrgInfo.json" \
+            --output "$RUNNER_TEMP/out"
+          bash tests/e2e/assert-output.sh "$RUNNER_TEMP/out"
+
   windows:
     name: Windows (PSScriptAnalyzer + Pester)
     runs-on: windows-latest
@@ -41,13 +55,13 @@ jobs:
         shell: pwsh
         run: |
           Set-PSRepository PSGallery -InstallationPolicy Trusted
-          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
-          Install-Module Pester -Force -Scope CurrentUser -SkipPublisherCheck
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.23.0 -Force -Scope CurrentUser
+          Install-Module Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 -Force -Scope CurrentUser -SkipPublisherCheck
 
       - name: PSScriptAnalyzer
         shell: pwsh
         run: |
-          $results = Invoke-ScriptAnalyzer -Path ./secureclient-repack.ps1 -Severity Warning, Error
+          $results = Invoke-ScriptAnalyzer -Path . -Recurse -Severity Warning, Error
           $results | Format-Table -AutoSize
           if ($results) { throw "PSScriptAnalyzer reported $($results.Count) finding(s)." }
 
@@ -55,13 +69,28 @@ jobs:
         shell: pwsh
         run: |
           $out = ./secureclient-repack.ps1 -Version
-          if ($out -ne 'secureclient-repack 1.0.0') { throw "Unexpected version output: $out" }
+          if ($out -ne 'secureclient-repack 1.1.0') { throw "Unexpected version output: $out" }
 
       - name: Pester tests
         shell: pwsh
         run: |
+          Import-Module Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99
           $config = New-PesterConfiguration
           $config.Run.Path = 'tests/windows.Tests.ps1'
           $config.Run.Exit = $true
           $config.Output.Verbosity = 'Detailed'
           Invoke-Pester -Configuration $config
+
+      - name: End-to-end against a synthetic bundle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $fixture = Join-Path $env:RUNNER_TEMP 'fixture'
+          & ./tests/e2e/Build-FixtureZip.ps1 -Destination $fixture
+          $out = Join-Path $env:RUNNER_TEMP 'out'
+          ./secureclient-repack.ps1 `
+            -Zip (Join-Path $fixture 'cisco-secure-client-win-9.9.9.9-predeploy-k9.zip') `
+            -Keep 'umbrella,dart' -Yes -AllowUnsignedMsi `
+            -OrgInfo (Join-Path $fixture 'OrgInfo.json') `
+            -Output $out
+          & ./tests/e2e/Assert-Output.ps1 -DeployRoot $out
