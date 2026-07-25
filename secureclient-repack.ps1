@@ -205,7 +205,7 @@ function Test-ProductCode {
     malformed code would then be preferred over the DisplayName fallback,
     producing detection that can never succeed.
     #>
-    param([Parameter(Mandatory)][AllowNull()][string]$Value)
+    param([Parameter(Mandatory)][AllowNull()][AllowEmptyString()][string]$Value)
     return $Value -match '^\{[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\}$'
 }
 
