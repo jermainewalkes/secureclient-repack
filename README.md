@@ -218,7 +218,7 @@ Both tools are plain-text command-line programs: prompts are linear and screen-r
 
 ## Support
 
-secureclient-repack is free software under the [MIT licence](LICENSE). If it saved you an afternoon of installer surgery, you can support development on [Ko-fi](https://ko-fi.com/jwalkes).
+secureclient-repack is free software under the [MIT licence](LICENSE). If it saved you a bit of fiddling with the installer, you can support development on [Ko-fi](https://ko-fi.com/jwalkes).
 
 ---
 
