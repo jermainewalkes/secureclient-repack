@@ -25,7 +25,7 @@ setup() {
 @test "--version prints the version" {
   run env SECURECLIENT_REPACK_TEST= bash "$SCRIPT" --version
   [ "$status" -eq 0 ]
-  [ "$output" = "secureclient-repack 1.2.0" ]
+  [ "$output" = "secureclient-repack 1.2.1" ]
 }
 
 @test "unknown option fails with an error" {
@@ -121,6 +121,37 @@ setup() {
   [ "$(shortcode choice_secure_firewall_posture)" = "$(shortcode securefirewallposture)" ]
   [ "$(shortcode network_visibility)" = "nvm" ]
   [ "$(shortcode zero-trust)" = "zta" ]
+}
+
+@test "short module codes are not matched inside ordinary words" {
+  # nam hides in dynamic, amp in example, duo in residuo, ui in build
+  [ "$(shortcode choice_dynamic_split_tunnel)" = "mod" ]
+  [ "$(shortcode choice_example_module)" = "mod" ]
+  [ "$(shortcode choice_residuo)" = "mod" ]
+  [ "$(shortcode choice_ampersand)" = "mod" ]
+  [ "$(friendly choice_dynamic_split_tunnel)" = "choice_dynamic_split_tunnel" ]
+}
+
+@test "short module codes still match as whole segments" {
+  [ "$(shortcode choice_nam)" = "nam" ]
+  [ "$(shortcode choice_amp)" = "amp" ]
+  [ "$(shortcode choice_duo)" = "duo" ]
+  [ "$(shortcode choice_sbl)" = "sbl" ]
+  [ "$(shortcode client-te-module)" = "te" ]
+}
+
+@test "friendly never disagrees with shortcode" {
+  for id in choice_anyconnect_vpn choice_ui choice_dart choice_secure_firewall_posture \
+            choice_iseposture choice_nvm choice_secure_umbrella choice_thousandeyes \
+            choice_duo choice_zta choice_dynamic_split_tunnel choice_unknown_thing; do
+    code="$(shortcode "$id")"
+    label="$(friendly "$id")"
+    if [ "$code" = "mod" ]; then
+      [ "$label" = "$id" ] || { echo "$id: code mod but label '$label'"; return 1; }
+    else
+      [ "$label" != "$id" ] || { echo "$id: code $code but no label"; return 1; }
+    fi
+  done
 }
 
 # ---------- outline discovery and keep selection -------------------------------

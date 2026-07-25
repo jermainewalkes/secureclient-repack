@@ -494,6 +494,15 @@ Describe 'product-code detection' {
         $text | Should -Match '\{22222222-2222-2222-2222-222222222222\}'
         $text | Should -Not -Match 'modulePatterns'
     }
+    It 'falls back to DisplayName patterns when a product code is malformed' {
+        $bad = @(
+            $script:CodedModules[0],
+            [pscustomobject]@{ Name = 'x-umbrella-predeploy-k9.msi'; Code = 'umbrella'; ProductCode = '{---}' }
+        )
+        $text = New-DetectScript -Kept $bad -BundleVersion '5.1.16.194'
+        $text | Should -Match 'modulePatterns'
+        $text | Should -Not -Match 'moduleCodes'
+    }
     It 'falls back to DisplayName patterns when a product code is missing' {
         $text = New-DetectScript -Kept $script:MixedModules -BundleVersion '5.1.16.194'
         $text | Should -Match 'modulePatterns'
@@ -537,5 +546,19 @@ Describe 'Get-MsiProductInfo' {
     }
     It 'returns nothing for a missing file rather than throwing' {
         Get-MsiProductInfo -Path (Join-Path $TestDrive 'nope.msi') | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Test-ProductCode' {
+    It 'accepts a canonical product code' {
+        Test-ProductCode -Value '{11111111-2222-3333-4444-555555555555}' | Should -BeTrue
+    }
+    It 'rejects hex-and-hyphen junk that is not a GUID' {
+        # {---} would otherwise be preferred over the DisplayName fallback and
+        # produce detection that can never succeed
+        Test-ProductCode -Value '{---}'      | Should -BeFalse
+        Test-ProductCode -Value '{deadbeef}' | Should -BeFalse
+        Test-ProductCode -Value 'not-a-guid' | Should -BeFalse
+        Test-ProductCode -Value ''           | Should -BeFalse
     }
 }

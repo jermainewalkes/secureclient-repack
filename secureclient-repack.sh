@@ -33,7 +33,7 @@ if [[ -z "${SECURECLIENT_REPACK_TEST:-}" ]]; then
   set -euo pipefail
 fi
 
-VERSION="1.2.0"
+VERSION="1.2.1"
 
 # ---------- helpers -----------------------------------------------------------
 lower(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
@@ -67,42 +67,61 @@ validate_payload_name(){
   esac
 }
 
-friendly(){
-  local lc cp; lc="$(lower "$1")"; cp="$(compact "$1")"
-  if [[ "$lc" != *vpn* ]] && is_ui_module "$lc"; then
-    echo "GUI / UI shell (pinned)"; return 0
-  fi
+shortcode(){
+  local lc segs cp t
+  lc="$(lower "$1")"
+  # separator-delimited segments, space-padded for whole-segment tests
+  segs=" ${lc//[._-]/ } "
+  cp="$(compact "$1")"
+
+  if [[ "$lc" != *vpn* ]] && is_ui_module "$lc"; then echo ui; return 0; fi
+  case "$cp" in *vpn*) echo vpn; return 0;; esac
+
+  # Long, distinctive spellings are safe to look for anywhere in the id.
   case "$cp" in
-    *vpn*)                          echo "VPN — Core & AnyConnect (base client, pinned)";;
-    *umbrella*)                     echo "Umbrella Roaming Security";;
-    *dart*)                         echo "DART — Diagnostics & Reporting";;
-    *duo*)                          echo "Duo Desktop";;
-    *iseposture*)                   echo "ISE Posture";;
-    *nvm*|*networkvisibility*)      echo "Network Visibility Module";;
-    *thousandeyes*)                 echo "ThousandEyes Endpoint Agent";;
-    *zta*|*zerotrust*)              echo "Zero Trust Access";;
-    *firewallposture*|*hostscan*|*secfirewall*) echo "Secure Firewall Posture";;
-    *posture*)                      echo "Posture";;
-    *fireamp*|*secureendpoint*|*amp*) echo "AMP Enabler / Secure Endpoint";;
-    *websecurity*)                  echo "Web Security (deprecated)";;
-    *nam*|*networkaccess*)          echo "Network Access Manager";;
-    *sbl*|*startbeforelogin*)       echo "Start Before Login";;
-    *)                              echo "$1";;
+    *umbrella*)                                 echo umbrella;    return 0;;
+    *dart*)                                     echo dart;        return 0;;
+    *iseposture*)                               echo ise;         return 0;;
+    *networkvisibility*)                        echo nvm;         return 0;;
+    *thousandeyes*)                             echo te;          return 0;;
+    *zerotrust*)                                echo zta;         return 0;;
+    *firewallposture*|*hostscan*|*secfirewall*) echo sfp;         return 0;;
+    *networkaccess*)                            echo nam;         return 0;;
+    *startbeforelogin*)                         echo sbl;         return 0;;
+    *websecurity*)                              echo websecurity; return 0;;
+    *fireamp*|*secureendpoint*)                 echo amp;         return 0;;
   esac
+
+  # Short codes must appear as a whole segment. As bare substrings they hide
+  # inside ordinary words: "nam" in dynamic, "amp" in example, "duo" in residuo.
+  for t in nvm zta te duo nam sbl amp ise; do
+    if [[ "$segs" == *" $t "* ]]; then echo "$t"; return 0; fi
+  done
+
+  case "$cp" in *posture*) echo posture; return 0;; esac
+  echo mod
 }
 
-shortcode(){
-  local lc cp; lc="$(lower "$1")"; cp="$(compact "$1")"
-  if [[ "$lc" != *vpn* ]] && is_ui_module "$lc"; then echo ui; return 0; fi
-  case "$cp" in
-    *vpn*) echo vpn;; *umbrella*) echo umbrella;;
-    *dart*) echo dart;; *duo*) echo duo;;
-    *iseposture*) echo ise;; *nvm*|*networkvisibility*) echo nvm;;
-    *thousandeyes*) echo te;; *zta*|*zerotrust*) echo zta;;
-    *firewallposture*|*hostscan*|*secfirewall*) echo sfp;; *posture*) echo posture;;
-    *amp*) echo amp;; *nam*|*networkaccess*) echo nam;;
-    *sbl*|*startbeforelogin*) echo sbl;; *websecurity*) echo websecurity;;
-    *) echo mod;;
+# Labels are derived from the code, so a module can never be labelled as one
+# thing and selected as another.
+friendly(){
+  case "$(shortcode "$1")" in
+    vpn)         echo "VPN — Core & AnyConnect (base client, pinned)";;
+    ui)          echo "GUI / UI shell (pinned)";;
+    umbrella)    echo "Umbrella Roaming Security";;
+    dart)        echo "DART — Diagnostics & Reporting";;
+    duo)         echo "Duo Desktop";;
+    ise)         echo "ISE Posture";;
+    nvm)         echo "Network Visibility Module";;
+    te)          echo "ThousandEyes Endpoint Agent";;
+    zta)         echo "Zero Trust Access";;
+    sfp)         echo "Secure Firewall Posture";;
+    posture)     echo "Posture";;
+    amp)         echo "AMP Enabler / Secure Endpoint";;
+    nam)         echo "Network Access Manager";;
+    sbl)         echo "Start Before Login";;
+    websecurity) echo "Web Security (deprecated)";;
+    *)           echo "$1";;
   esac
 }
 
@@ -133,6 +152,7 @@ Options:
   --version            Show the version and exit
 
 Module codes: vpn ui umbrella dart duo ise nvm te zta sfp posture amp nam sbl
+              websecurity
 (only codes present in your package apply; the interactive menu shows
 what the package actually contains).
 

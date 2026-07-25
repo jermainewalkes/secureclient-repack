@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/badge/licence-MIT-green" alt="MIT licence">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Windows-blue" alt="macOS and Windows">
   <img src="https://img.shields.io/badge/runtime-bash%203.2%2B%20%7C%20PowerShell%205.1%2B-lightgrey" alt="bash 3.2+ and PowerShell 5.1+">
-  <img src="https://img.shields.io/badge/tests-105%20passing-brightgreen" alt="105 tests passing">
+  <img src="https://img.shields.io/badge/tests-111%20passing-brightgreen" alt="111 tests passing">
   <a href="https://ko-fi.com/jwalkes"><img src="https://img.shields.io/badge/Ko--fi-support-ff5e5b?logo=ko-fi&logoColor=white" alt="Support on Ko-fi"></a>
 </p>
 
@@ -134,7 +134,7 @@ powershell -ExecutionPolicy Bypass -File .\secureclient-repack.ps1
 .\secureclient-repack.ps1 -Zip C:\pkgs\csc-predeploy.zip -Keep all -Output C:\out -Yes -Force
 ```
 
-Module codes: `vpn` `ui` `umbrella` `dart` `duo` `ise` `nvm` `te` `zta` `sfp` `posture` `amp` `nam` `sbl` `websecurity`. Only codes present in your package apply. Secure Firewall Posture is `sfp`; ISE Posture is `ise`.
+Module codes: `vpn` `ui` `umbrella` `dart` `duo` `ise` `nvm` `te` `zta` `sfp` `posture` `amp` `nam` `sbl` `websecurity`. Only codes present in your package apply — macOS packages and Windows bundles ship different module sets, and the interactive menu shows what yours actually contains. Secure Firewall Posture is `sfp`; ISE Posture is `ise`.
 
 ## MDM deployment
 
@@ -188,8 +188,8 @@ secureclient-repack/
 ├── tests/
 │   ├── fixtures/Distribution.xml # synthetic multi-module Distribution
 │   ├── e2e/                      # synthetic DMG and zip builders + assertions
-│   ├── macos.bats                # bats-core suite (42 tests)
-│   └── windows.Tests.ps1         # Pester suite (63 tests)
+│   ├── macos.bats                # bats-core suite (45 tests)
+│   └── windows.Tests.ps1         # Pester suite (66 tests)
 └── .github/workflows/ci.yml      # shellcheck + bats, PSScriptAnalyzer + Pester
 ```
 

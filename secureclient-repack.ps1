@@ -90,7 +90,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:ToolVersion = '1.2.0'
+$script:ToolVersion = '1.2.1'
 
 if ($Version) {
     Write-Output "secureclient-repack $script:ToolVersion"
@@ -196,6 +196,19 @@ function Test-PinnedModule {
     return $Code -eq 'vpn'
 }
 
+function Test-ProductCode {
+    <#
+    .SYNOPSIS
+    Is this a canonical MSI product code?
+    .DESCRIPTION
+    Checking only for hex and hyphens would accept junk such as {---}, and a
+    malformed code would then be preferred over the DisplayName fallback,
+    producing detection that can never succeed.
+    #>
+    param([Parameter(Mandatory)][AllowNull()][string]$Value)
+    return $Value -match '^\{[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\}$'
+}
+
 function Get-MsiProductInfo {
     <#
     .SYNOPSIS
@@ -212,6 +225,8 @@ function Get-MsiProductInfo {
     param([Parameter(Mandatory)][string]$Path)
     $installer = $null
     $database = $null
+    $view = $null
+    $record = $null
     try {
         $installer = New-Object -ComObject WindowsInstaller.Installer
         # 0 = read-only
@@ -229,6 +244,13 @@ function Get-MsiProductInfo {
                     'StringData', 'GetProperty', $null, $record, @(1))
             }
             $view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null) | Out-Null
+            # released here rather than in the finally block: these are created
+            # once per property, and a leaked reference keeps the MSI file locked
+            foreach ($com in $record, $view) {
+                if ($com) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($com) }
+            }
+            $record = $null
+            $view = $null
         }
         if (-not $result.ContainsKey('ProductCode')) { return $null }
         return [pscustomobject]@{
@@ -237,6 +259,9 @@ function Get-MsiProductInfo {
             ProductName    = [string]$result['ProductName']
         }
     } catch {
+        # an unreadable file is expected (a placeholder, or a non-Windows host);
+        # surface the reason for anything else rather than silently degrading
+        Write-Verbose ("Could not read MSI metadata from {0}: {1}" -f $Path, $_.Exception.Message)
         return $null
     } finally {
         foreach ($obj in $database, $installer) {
@@ -526,7 +551,8 @@ function New-DetectScript {
     $codes = @($Kept |
         Where-Object { -not (Test-PinnedModule -Code $_.Code) } |
         ForEach-Object { if ($_.PSObject.Properties['ProductCode']) { $_.ProductCode } } |
-        Where-Object { $_ -match '^\{[0-9A-Fa-f-]+\}$' } |
+        Where-Object { $_ } |
+        Where-Object { Test-ProductCode -Value $_ } |
         Sort-Object -Unique)
     $expectedModules = @($Kept | Where-Object { -not (Test-PinnedModule -Code $_.Code) }).Count
 

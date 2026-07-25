@@ -69,7 +69,7 @@ jobs:
         shell: pwsh
         run: |
           $out = ./secureclient-repack.ps1 -Version
-          if ($out -ne 'secureclient-repack 1.2.0') { throw "Unexpected version output: $out" }
+          if ($out -ne 'secureclient-repack 1.2.1') { throw "Unexpected version output: $out" }
 
       - name: Pester tests
         shell: pwsh
