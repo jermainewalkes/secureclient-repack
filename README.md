@@ -14,7 +14,7 @@
   <a href="https://ko-fi.com/jwalkes"><img src="https://img.shields.io/badge/Ko--fi-support-ff5e5b?logo=ko-fi&logoColor=white" alt="Support on Ko-fi"></a>
 </p>
 
-Cisco ships Secure Client as an everything-included installer: VPN, Umbrella, DART, posture agents, ThousandEyes and more. Most organisations deploy two or three of those modules, yet the stock package advertises them all to your MDM, bloats the upload and clutters the app inventory. secureclient-repack takes your own licensed predeploy package and produces a lean, deployment-ready build containing only the modules you choose — repackaged and re-signed on macOS, selected and scripted on Windows.
+The Secure Client predeploy package ships with every module, and the vendor documents how to remove the ones you do not want — editing the installer's choices on macOS, or picking MSIs from the bundle on Windows. secureclient-repack just wraps those documented steps in an interactive script: it walks you through which modules to keep, then does the fiddly parts for you — stripping and re-signing the pkg on macOS, or assembling the MSIs and deployment scripts on Windows.
 
 An interactive run looks like this:
 
