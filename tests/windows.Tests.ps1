@@ -39,6 +39,7 @@ Describe 'Get-ModuleCode' {
     It 'identifies every optional module Cisco ships' {
         $cases = @{
             'umbrella'     = 'umbrella'
+            'duo'          = 'duo'
             'dart'         = 'dart'
             'iseposture'   = 'ise'
             'nvm'          = 'nvm'
@@ -472,5 +473,69 @@ function Start-Process {
     It 'fails fast with the real code when the core module fails' {
         Invoke-GeneratedInstall -Text $script:InstallText `
             -ExitCodes @{ $script:CoreName = 1618; $script:UmbName = 0 } | Should -Be 1618
+    }
+}
+
+Describe 'product-code detection' {
+    BeforeAll {
+        $script:CodedModules = @(
+            [pscustomobject]@{ Name = 'cisco-secure-client-win-5.1.16.194-core-vpn-predeploy-k9.msi'; Code = 'vpn';      ProductCode = '{11111111-1111-1111-1111-111111111111}' },
+            [pscustomobject]@{ Name = 'cisco-secure-client-win-5.1.16.194-umbrella-predeploy-k9.msi'; Code = 'umbrella'; ProductCode = '{22222222-2222-2222-2222-222222222222}' }
+        )
+        $script:MixedModules = @(
+            $script:CodedModules[0],
+            [pscustomobject]@{ Name = 'x-umbrella-predeploy-k9.msi'; Code = 'umbrella'; ProductCode = $null }
+        )
+    }
+
+    It 'uses product codes when every kept module has one' {
+        $text = New-DetectScript -Kept $script:CodedModules -BundleVersion '5.1.16.194'
+        $text | Should -Match 'moduleCodes'
+        $text | Should -Match '\{22222222-2222-2222-2222-222222222222\}'
+        $text | Should -Not -Match 'modulePatterns'
+    }
+    It 'falls back to DisplayName patterns when a product code is missing' {
+        $text = New-DetectScript -Kept $script:MixedModules -BundleVersion '5.1.16.194'
+        $text | Should -Match 'modulePatterns'
+        $text | Should -Match '\*Umbrella\*'
+    }
+    It 'says why it fell back, so a pilot check is actionable' {
+        $text = New-DetectScript -Kept $script:MixedModules -BundleVersion '5.1.16.194'
+        $text | Should -Match 'not detected: no installed product matches'
+    }
+    It 'reports installed when the product codes are present' {
+        $text = New-DetectScript -Kept $script:CodedModules -BundleVersion '5.1.16.194'
+        $entries = @(
+            [pscustomobject]@{ DisplayName = 'Cisco Secure Client - AnyConnect VPN'; DisplayVersion = '5.1.16.194'; PSChildName = '{11111111-1111-1111-1111-111111111111}' },
+            [pscustomobject]@{ DisplayName = 'Cisco Secure Client - Umbrella Roaming Security'; DisplayVersion = '5.1.16.194'; PSChildName = '{22222222-2222-2222-2222-222222222222}' }
+        )
+        Invoke-GeneratedDetect -Text $text -Entries $entries | Should -Be 0
+    }
+    It 'is unaffected by a module DisplayName Cisco has renamed' {
+        # the whole point: detection must not hinge on a label we guessed
+        $text = New-DetectScript -Kept $script:CodedModules -BundleVersion '5.1.16.194'
+        $entries = @(
+            [pscustomobject]@{ DisplayName = 'Cisco Secure Client - Core VPN'; DisplayVersion = '5.1.16.194'; PSChildName = '{11111111-1111-1111-1111-111111111111}' },
+            [pscustomobject]@{ DisplayName = 'Cisco Secure Client - Umbrella Module (2027 edition)'; DisplayVersion = '5.1.16.194'; PSChildName = '{22222222-2222-2222-2222-222222222222}' }
+        )
+        Invoke-GeneratedDetect -Text $text -Entries $entries | Should -Be 0
+    }
+    It 'reports not-installed when a module product code is absent' {
+        $text = New-DetectScript -Kept $script:CodedModules -BundleVersion '5.1.16.194'
+        $entries = @(
+            [pscustomobject]@{ DisplayName = 'Cisco Secure Client - AnyConnect VPN'; DisplayVersion = '5.1.16.194'; PSChildName = '{11111111-1111-1111-1111-111111111111}' }
+        )
+        Invoke-GeneratedDetect -Text $text -Entries $entries | Should -Be 1
+    }
+}
+
+Describe 'Get-MsiProductInfo' {
+    It 'returns nothing for a file that is not an MSI rather than throwing' {
+        $fake = Join-Path $TestDrive 'not-really.msi'
+        Set-Content -LiteralPath $fake -Value 'placeholder'
+        Get-MsiProductInfo -Path $fake | Should -BeNullOrEmpty
+    }
+    It 'returns nothing for a missing file rather than throwing' {
+        Get-MsiProductInfo -Path (Join-Path $TestDrive 'nope.msi') | Should -BeNullOrEmpty
     }
 }

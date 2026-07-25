@@ -90,7 +90,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:ToolVersion = '1.1.2'
+$script:ToolVersion = '1.2.0'
 
 if ($Version) {
     Write-Output "secureclient-repack $script:ToolVersion"
@@ -124,6 +124,7 @@ function Get-ModuleCode {
         '(^|-)(core-vpn|vpn-core|anyconnect-core)($|-)'   { return 'vpn' }
         '(^|-)umbrella($|-)'                             { return 'umbrella' }
         '(^|-)dart($|-)'                                 { return 'dart' }
+        '(^|-)duo($|-)'                                  { return 'duo' }
         '(^|-)(ise-?posture)($|-)'                       { return 'ise' }
         '(^|-)(nvm|network-?visibility)($|-)'            { return 'nvm' }
         '(^|-)thousandeyes($|-)'                         { return 'te' }
@@ -143,6 +144,7 @@ function Get-ModuleFriendlyName {
         'vpn'         { 'VPN — Core & AnyConnect (base client, pinned)' }
         'umbrella'    { 'Umbrella Roaming Security' }
         'dart'        { 'DART — Diagnostics & Reporting' }
+        'duo'         { 'Duo Desktop' }
         'ise'         { 'ISE Posture' }
         'nvm'         { 'Network Visibility Module' }
         'te'          { 'ThousandEyes Endpoint Agent' }
@@ -176,6 +178,7 @@ function Get-ModuleDisplayNamePattern {
         'vpn'      { $null }
         'umbrella' { '*Umbrella*' }
         'dart'     { '*Diagnostic*' }
+        'duo'      { '*Duo*' }
         'ise'      { '*ISE Posture*' }
         'nvm'      { '*Network Visibility*' }
         'te'       { '*ThousandEyes*' }
@@ -191,6 +194,55 @@ function Get-ModuleDisplayNamePattern {
 function Test-PinnedModule {
     param([Parameter(Mandatory)][string]$Code)
     return $Code -eq 'vpn'
+}
+
+function Get-MsiProductInfo {
+    <#
+    .SYNOPSIS
+    Read ProductCode and ProductVersion out of an MSI's own Property table.
+    .DESCRIPTION
+    This is what makes detection exact. Matching on Add/Remove Programs
+    DisplayName means guessing a string Cisco can change between builds, and a
+    wrong guess leaves detection failing for ever. The product code is the key
+    the installer itself uses.
+
+    Returns $null when the file cannot be read as an MSI — on a non-Windows
+    host, or for a placeholder — so the caller can fall back.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    $installer = $null
+    $database = $null
+    try {
+        $installer = New-Object -ComObject WindowsInstaller.Installer
+        # 0 = read-only
+        $database = $installer.GetType().InvokeMember(
+            'OpenDatabase', 'InvokeMethod', $null, $installer, @($Path, 0))
+        $result = @{}
+        foreach ($property in 'ProductCode', 'ProductVersion', 'ProductName') {
+            $view = $database.GetType().InvokeMember(
+                'OpenView', 'InvokeMethod', $null, $database,
+                @("SELECT Value FROM Property WHERE Property = '$property'"))
+            $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null) | Out-Null
+            $record = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
+            if ($record) {
+                $result[$property] = $record.GetType().InvokeMember(
+                    'StringData', 'GetProperty', $null, $record, @(1))
+            }
+            $view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null) | Out-Null
+        }
+        if (-not $result.ContainsKey('ProductCode')) { return $null }
+        return [pscustomobject]@{
+            ProductCode    = [string]$result['ProductCode']
+            ProductVersion = [string]$result['ProductVersion']
+            ProductName    = [string]$result['ProductName']
+        }
+    } catch {
+        return $null
+    } finally {
+        foreach ($obj in $database, $installer) {
+            if ($obj) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($obj) }
+        }
+    }
 }
 
 # ---------- safety helpers ------------------------------------------------------
@@ -469,14 +521,42 @@ function New-DetectScript {
         'if ($null -eq $wanted) { exit 1 }',
         'if ($installed -lt $wanted) { exit 1 }'
     )
-    if ($patterns.Count -gt 0) {
+    # Product codes are exact, so prefer them; DisplayName patterns are a guess at
+    # a string Cisco controls and can change between builds.
+    $codes = @($Kept |
+        Where-Object { -not (Test-PinnedModule -Code $_.Code) } |
+        ForEach-Object { if ($_.PSObject.Properties['ProductCode']) { $_.ProductCode } } |
+        Where-Object { $_ -match '^\{[0-9A-Fa-f-]+\}$' } |
+        Sort-Object -Unique)
+    $expectedModules = @($Kept | Where-Object { -not (Test-PinnedModule -Code $_.Code) }).Count
+
+    if ($codes.Count -gt 0 -and $codes.Count -eq $expectedModules) {
         $lines += @(
             '',
             '# every kept module must be present too, so adding one to an existing',
-            '# install is still delivered',
+            '# install is still delivered. Matched on product code, which the',
+            '# installer itself owns, so no DisplayName guesswork is involved.',
+            ('$moduleCodes = @(' + (($codes | ForEach-Object { ConvertTo-PsSingleQuoted $_ }) -join ', ') + ')'),
+            '$installedCodes = @($entries | ForEach-Object { $_.PSChildName })',
+            'foreach ($code in $moduleCodes) {',
+            '    if ($installedCodes -notcontains $code) { exit 1 }',
+            '}'
+        )
+    } elseif ($patterns.Count -gt 0) {
+        $lines += @(
+            '',
+            '# every kept module must be present too, so adding one to an existing',
+            '# install is still delivered.',
+            '# These DisplayName patterns could not be replaced with product codes',
+            '# (the MSIs were not readable at repack time). They come from',
+            '# Add/Remove Programs: run this script on one pilot device and adjust',
+            '# them here if a module in your build is labelled differently.',
             ('$modulePatterns = @(' + (($patterns | ForEach-Object { ConvertTo-PsSingleQuoted $_ }) -join ', ') + ')'),
             'foreach ($pattern in $modulePatterns) {',
-            '    if (-not ($entries | Where-Object { $_.DisplayName -like $pattern })) { exit 1 }',
+            '    if (-not ($entries | Where-Object { $_.DisplayName -like $pattern })) {',
+            '        Write-Output "not detected: no installed product matches $pattern"',
+            '        exit 1',
+            '    }',
             '}'
         )
     }
@@ -548,10 +628,13 @@ try {
     }
 
     $modules = @($msis | ForEach-Object {
+        $info = Get-MsiProductInfo -Path $_.FullName
         [pscustomobject]@{
-            Name = $_.Name
-            Path = $_.FullName
-            Code = Get-ModuleCode -Name $_.Name
+            Name           = $_.Name
+            Path           = $_.FullName
+            Code           = Get-ModuleCode -Name $_.Name
+            ProductCode    = if ($info) { $info.ProductCode } else { $null }
+            ProductVersion = if ($info) { $info.ProductVersion } else { $null }
         }
     })
     if (-not ($modules | Where-Object { Test-PinnedModule -Code $_.Code })) {
@@ -686,6 +769,17 @@ try {
     Set-Content -LiteralPath (Join-Path $deployDir 'install.ps1')   -Value (New-InstallScript -Kept $kept -HasOrgInfo:([bool]$orgPath)) -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $deployDir 'uninstall.ps1') -Value (New-UninstallScript) -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $deployDir 'detect.ps1')    -Value (New-DetectScript -Kept $kept -BundleVersion $bundleVersion) -Encoding UTF8
+
+    $optional = @($kept | Where-Object { -not (Test-PinnedModule -Code $_.Code) })
+    $withCode = @($optional | Where-Object { $_.ProductCode })
+    if ($optional.Count -eq 0) {
+        Write-Host 'Detection: core client version only.'
+    } elseif ($withCode.Count -eq $optional.Count) {
+        Write-Host 'Detection: core client version plus each module''s product code.'
+    } else {
+        Write-Host 'Detection: core client version plus module DisplayName patterns —'
+        Write-Host '  the MSI product codes could not be read, so verify detect.ps1 on a pilot device.'
+    }
 
     Write-Host ''
     Write-Host 'Deployment folder contents:'

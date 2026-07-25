@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/badge/licence-MIT-green" alt="MIT licence">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Windows-blue" alt="macOS and Windows">
   <img src="https://img.shields.io/badge/runtime-bash%203.2%2B%20%7C%20PowerShell%205.1%2B-lightgrey" alt="bash 3.2+ and PowerShell 5.1+">
-  <img src="https://img.shields.io/badge/tests-93%20passing-brightgreen" alt="93 tests passing">
+  <img src="https://img.shields.io/badge/tests-105%20passing-brightgreen" alt="105 tests passing">
   <a href="https://ko-fi.com/jwalkes"><img src="https://img.shields.io/badge/Ko--fi-support-ff5e5b?logo=ko-fi&logoColor=white" alt="Support on Ko-fi"></a>
 </p>
 
@@ -51,6 +51,7 @@ Package "Cisco Secure Client-5.1.10.233-vpn-ui-umbrella-signed.pkg":
 - **Full strip (macOS)** — removes each dropped module's install choice, its pkg-refs *and* its payload folder, so the rebuilt pkg only advertises what it contains. Shared payloads that a kept module still needs are protected automatically.
 - **Re-signing (macOS)** — signs the rebuilt pkg with your "Developer ID Installer" identity, or stops at an unsigned pkg with `--no-sign`.
 - **Deployment scripts (Windows)** — copies the kept MSIs out of the predeploy zip and generates `install.ps1`, `uninstall.ps1` and `detect.ps1`, ready for an Intune Win32 app or any MDM that runs PowerShell. Install returns the real msiexec result, including `3010` when a reboot is needed; detection is version-aware, so upgrades actually deploy.
+- **Exact detection (Windows)** — each MSI's product code is read from its own Property table and used in `detect.ps1`, so detection does not depend on guessing an Add/Remove Programs label that Cisco can rename between builds. When a product code cannot be read, the script falls back to `DisplayName` patterns and says so.
 - **Signature checking (Windows)** — every kept MSI's Authenticode signature is verified and its signer reported. Anything not validly signed is refused unless you pass `-AllowUnsignedMsi`, and a valid signature by anyone other than Cisco is called out, since trusted-but-not-Cisco is not the same as genuine.
 - **Umbrella OrgInfo handling** — validates your `OrgInfo.json` and emits it as a root shell script (macOS) or embeds it in `install.ps1` (Windows) so the module registers with your dashboard.
 - **Safety guards** — the transform is verified before anything is built: every kept choice must survive, every dropped choice must be gone and every referenced payload must still exist, otherwise the run aborts.
@@ -133,7 +134,7 @@ powershell -ExecutionPolicy Bypass -File .\secureclient-repack.ps1
 .\secureclient-repack.ps1 -Zip C:\pkgs\csc-predeploy.zip -Keep all -Output C:\out -Yes -Force
 ```
 
-Module codes: `vpn` `ui` `umbrella` `dart` `ise` `nvm` `te` `zta` `sfp` `posture` `amp` (macOS), plus `nam`, `sbl` and `websecurity` on Windows. Only codes present in your package apply. Secure Firewall Posture is `sfp`; ISE Posture is `ise`.
+Module codes: `vpn` `ui` `umbrella` `dart` `duo` `ise` `nvm` `te` `zta` `sfp` `posture` `amp` `nam` `sbl` `websecurity`. Only codes present in your package apply. Secure Firewall Posture is `sfp`; ISE Posture is `ise`.
 
 ## MDM deployment
 
@@ -148,7 +149,7 @@ Module codes: `vpn` `ui` `umbrella` `dart` `ise` `nvm` `te` `zta` `sfp` `posture
 - Upload the deployment folder as a **Win32 app** (wrap it with `-IntuneWin` or the Win32 Content Prep Tool). Use the generated `install.ps1`, `uninstall.ps1` and `detect.ps1`.
 - `uninstall.ps1` removes **every** installed Secure Client module, not only the ones this package shipped. That is deliberate: every optional module depends on the core VPN, so removing the core while leaving modules behind would strand them on a broken client.
 - Map exit code **3010** to "soft reboot" in the app's return codes. `install.ps1` returns it when a module asks for a restart, so the client finishes cleanly instead of being reported as failed.
-- `detect.ps1` compares the installed core version against the version in the package, so upgrades and added modules are delivered rather than skipped. It identifies modules by their Add/Remove Programs `DisplayName`; those strings are listed at the top of the script — confirm them against a pilot device once, and edit them there if your Cisco build labels a module differently.
+- `detect.ps1` compares the installed core version against the version in the package, so upgrades and added modules are delivered rather than skipped. Modules are matched on their MSI product code, which the installer itself owns. If the tool could not read the product codes it falls back to `DisplayName` patterns and tells you so at the end of the run — in that case, run `detect.ps1` once on a pilot device and adjust the patterns listed at the top of the script.
 - Set **Run script as 32-bit process on 64-bit clients** to **No** for the detection script, so it reads the native registry view.
 
 ### Jamf Pro and Kandji (macOS)
@@ -187,12 +188,14 @@ secureclient-repack/
 ├── tests/
 │   ├── fixtures/Distribution.xml # synthetic multi-module Distribution
 │   ├── e2e/                      # synthetic DMG and zip builders + assertions
-│   ├── macos.bats                # bats-core suite (38 tests)
-│   └── windows.Tests.ps1         # Pester suite (55 tests)
+│   ├── macos.bats                # bats-core suite (42 tests)
+│   └── windows.Tests.ps1         # Pester suite (63 tests)
 └── .github/workflows/ci.yml      # shellcheck + bats, PSScriptAnalyzer + Pester
 ```
 
-CI does not stop at unit tests: both jobs build a synthetic package from `tests/e2e`, run the real tool over it end to end and assert the resulting artefacts — the stripped `Distribution`, the deleted payloads and the generated scripts.
+CI does not stop at unit tests: both jobs build a synthetic package from `tests/e2e`, run the real tool over it end to end and assert the resulting artefacts — the stripped `Distribution`, the deleted payloads and the generated scripts. The Windows suite goes further and *executes* the generated `detect.ps1` and `install.ps1` in a child PowerShell with the registry and `msiexec` stubbed, checking the exit code an MDM would actually see.
+
+The macOS tool is also verified by hand against a real Cisco predeploy DMG before each release; the module vocabulary is covered by tests using the genuine choice ids from Secure Client 5.1.18.
 
 Run the tests:
 

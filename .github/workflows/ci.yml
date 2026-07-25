@@ -15,7 +15,7 @@ jobs:
     name: macOS (shellcheck + bats)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install tooling
         run: brew install shellcheck bats-core
@@ -49,7 +49,7 @@ jobs:
     name: Windows (PSScriptAnalyzer + Pester)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install tooling
         shell: pwsh
@@ -69,7 +69,7 @@ jobs:
         shell: pwsh
         run: |
           $out = ./secureclient-repack.ps1 -Version
-          if ($out -ne 'secureclient-repack 1.1.2') { throw "Unexpected version output: $out" }
+          if ($out -ne 'secureclient-repack 1.2.0') { throw "Unexpected version output: $out" }
 
       - name: Pester tests
         shell: pwsh

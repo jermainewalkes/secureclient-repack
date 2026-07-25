@@ -33,7 +33,7 @@ if [[ -z "${SECURECLIENT_REPACK_TEST:-}" ]]; then
   set -euo pipefail
 fi
 
-VERSION="1.1.2"
+VERSION="1.2.0"
 
 # ---------- helpers -----------------------------------------------------------
 lower(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
@@ -43,6 +43,12 @@ die(){ echo "ERROR: $*" >&2; exit 1; }
 # match anything merely containing them — build, suite, requirements, guided —
 # which would then be labelled as the UI shell and impossible to drop.
 is_ui_module(){ [[ "$(lower "$1")" =~ (^|[^a-z0-9])(gui|ui)([^a-z0-9]|$) ]]; }
+
+# Choice ids do not agree on separators: 5.1.18 ships choice_secure_firewall_posture
+# where the compact spelling is firewallposture. Comparing with separators removed
+# lets one pattern cover both, rather than a module silently falling through to a
+# generic label and code.
+compact(){ printf '%s' "$(lower "$1")" | tr -d '_-.'; }
 
 # The base client cannot run without the VPN core or the GUI shell.
 is_pinned(){
@@ -62,15 +68,16 @@ validate_payload_name(){
 }
 
 friendly(){
-  local lc; lc="$(lower "$1")"
+  local lc cp; lc="$(lower "$1")"; cp="$(compact "$1")"
   if [[ "$lc" != *vpn* ]] && is_ui_module "$lc"; then
     echo "GUI / UI shell (pinned)"; return 0
   fi
-  case "$lc" in
+  case "$cp" in
     *vpn*)                          echo "VPN — Core & AnyConnect (base client, pinned)";;
     *umbrella*)                     echo "Umbrella Roaming Security";;
     *dart*)                         echo "DART — Diagnostics & Reporting";;
-    *iseposture*|*ise_posture*)     echo "ISE Posture";;
+    *duo*)                          echo "Duo Desktop";;
+    *iseposture*)                   echo "ISE Posture";;
     *nvm*|*networkvisibility*)      echo "Network Visibility Module";;
     *thousandeyes*)                 echo "ThousandEyes Endpoint Agent";;
     *zta*|*zerotrust*)              echo "Zero Trust Access";;
@@ -85,14 +92,17 @@ friendly(){
 }
 
 shortcode(){
-  local lc; lc="$(lower "$1")"
+  local lc cp; lc="$(lower "$1")"; cp="$(compact "$1")"
   if [[ "$lc" != *vpn* ]] && is_ui_module "$lc"; then echo ui; return 0; fi
-  case "$lc" in
+  case "$cp" in
     *vpn*) echo vpn;; *umbrella*) echo umbrella;;
-    *dart*) echo dart;; *iseposture*) echo ise;; *nvm*) echo nvm;;
-    *thousandeyes*) echo te;; *zta*) echo zta;;
-    *firewallposture*|*hostscan*) echo sfp;; *posture*) echo posture;;
-    *amp*) echo amp;; *) echo mod;;
+    *dart*) echo dart;; *duo*) echo duo;;
+    *iseposture*) echo ise;; *nvm*|*networkvisibility*) echo nvm;;
+    *thousandeyes*) echo te;; *zta*|*zerotrust*) echo zta;;
+    *firewallposture*|*hostscan*|*secfirewall*) echo sfp;; *posture*) echo posture;;
+    *amp*) echo amp;; *nam*|*networkaccess*) echo nam;;
+    *sbl*|*startbeforelogin*) echo sbl;; *websecurity*) echo websecurity;;
+    *) echo mod;;
   esac
 }
 
@@ -122,7 +132,7 @@ Options:
   --help               Show this help and exit
   --version            Show the version and exit
 
-Module codes: vpn ui umbrella dart ise nvm te zta sfp posture amp
+Module codes: vpn ui umbrella dart duo ise nvm te zta sfp posture amp nam sbl
 (only codes present in your package apply; the interactive menu shows
 what the package actually contains).
 

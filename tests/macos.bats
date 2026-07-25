@@ -25,7 +25,7 @@ setup() {
 @test "--version prints the version" {
   run env SECURECLIENT_REPACK_TEST= bash "$SCRIPT" --version
   [ "$status" -eq 0 ]
-  [ "$output" = "secureclient-repack 1.1.2" ]
+  [ "$output" = "secureclient-repack 1.2.0" ]
 }
 
 @test "unknown option fails with an error" {
@@ -80,6 +80,47 @@ setup() {
   [ "$(shortcode module_dart)" = "dart" ]
   [ "$(shortcode module_nvm)" = "nvm" ]
   [ "$(shortcode something_else)" = "mod" ]
+}
+
+@test "the real 5.1.18 choice ids all map to a known module" {
+  # taken from cisco-secure-client-macos-5.1.18.314-predeploy-k9.dmg; a module
+  # falling through to "mod" means it cannot be selected by name and shows as a
+  # raw id in the menu
+  run_case() { [ "$(shortcode "$1")" = "$2" ] || { echo "shortcode $1 = $(shortcode "$1"), want $2"; return 1; }; }
+  run_case choice_anyconnect_vpn vpn
+  run_case choice_ui ui
+  run_case choice_dart dart
+  run_case choice_secure_firewall_posture sfp
+  run_case choice_iseposture ise
+  run_case choice_nvm nvm
+  run_case choice_secure_umbrella umbrella
+  run_case choice_thousandeyes te
+  run_case choice_duo duo
+  run_case choice_zta zta
+}
+
+@test "the real 5.1.18 choice ids all have a friendly label" {
+  for id in choice_anyconnect_vpn choice_ui choice_dart choice_secure_firewall_posture \
+            choice_iseposture choice_nvm choice_secure_umbrella choice_thousandeyes \
+            choice_duo choice_zta; do
+    label="$(friendly "$id")"
+    [ "$label" != "$id" ] || { echo "no friendly label for $id"; return 1; }
+  done
+}
+
+@test "only the real base components are pinned" {
+  is_pinned choice_anyconnect_vpn
+  is_pinned choice_ui
+  for id in choice_dart choice_secure_firewall_posture choice_iseposture choice_nvm \
+            choice_secure_umbrella choice_thousandeyes choice_duo choice_zta; do
+    ! is_pinned "$id" || { echo "$id should not be pinned"; return 1; }
+  done
+}
+
+@test "separator style does not change the module code" {
+  [ "$(shortcode choice_secure_firewall_posture)" = "$(shortcode securefirewallposture)" ]
+  [ "$(shortcode network_visibility)" = "nvm" ]
+  [ "$(shortcode zero-trust)" = "zta" ]
 }
 
 # ---------- outline discovery and keep selection -------------------------------
